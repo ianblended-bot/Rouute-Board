@@ -1,0 +1,1508 @@
+/* =========================================================
+   app.js — Route Board application logic
+   ========================================================= */
+
+/* ---------------- date helpers ---------------- */
+const pad2 = n => String(n).padStart(2,'0');
+function toISO(d){ return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; }
+function fromISO(s){ const [y,m,d] = s.split('-').map(Number); return new Date(y, m-1, d); }
+function todayISO(){ return toISO(new Date()); }
+function addDays(d, n){ const nd = new Date(d); nd.setDate(nd.getDate()+n); return nd; }
+function isoAddDays(iso, n){ return toISO(addDays(fromISO(iso), n)); }
+function daysBetween(aISO, bISO){ return Math.round((fromISO(bISO) - fromISO(aISO)) / 86400000); }
+function mondayOf(d){ const nd = new Date(d); const day = nd.getDay(); const diff = (day===0? -6 : 1-day); nd.setDate(nd.getDate()+diff); nd.setHours(0,0,0,0); return nd; }
+const DOW_SHORT = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+function humanDate(iso){
+  const d = fromISO(iso);
+  return `${DOW_SHORT[(d.getDay()+6)%7]} ${d.getDate()} ${d.toLocaleString('en-GB',{month:'short'})}`;
+}
+function humanDateShort(iso){
+  const d = fromISO(iso);
+  return `${d.getDate()} ${d.toLocaleString('en-GB',{month:'short'})}`;
+}
+function monthLabel(d){ return d.toLocaleString('en-GB',{month:'long', year:'numeric'}); }
+
+/* ---------------- region metadata ---------------- */
+const REGIONS = {
+  east:     { label:'East · North bank', badge:'badge-east' },
+  west:     { label:'West · South bank', badge:'badge-west' },
+  floating: { label:'Floating / exterior', badge:'badge-floating' },
+  outside:  { label:'Outside London', badge:'badge-outside' },
+};
+const EVENT_TYPES = {
+  techVisit: { label:'Tech visit', short:'Tech visit' },
+  qaVisit:   { label:'QA visit', short:'QA visit' },
+  oneOnOne:  { label:'1-1', short:'1-1' },
+  wfh:       { label:'Working from home', short:'WFH' },
+  leave:     { label:'Annual leave', short:'AL' },
+  other:     { label:'Other / admin', short:'Other' },
+};
+
+/* ---------------- app state ---------------- */
+const state = {
+  route: 'dashboard',
+  weekStart: mondayOf(new Date()),
+  techFilter: 'all',
+  siteFilter: 'all',
+  searchQuery: '',
+  searchTypeFilter: 'all',
+  searchTimeFilter: 'all',
+  cache: { technicians:[], sites:[], events:[], settings:null },
+};
+
+async function refreshCache(){
+  const [technicians, sites, events, settings] = await Promise.all([
+    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings')
+  ]);
+  technicians.sort((a,b)=>a.name.localeCompare(b.name));
+  sites.sort((a,b)=>a.name.localeCompare(b.name));
+  events.sort((a,b)=>a.date.localeCompare(b.date));
+  state.cache = { technicians, sites, events, settings };
+}
+
+/* ---------------- status / KPI computation ---------------- */
+function lastEventFor(events, matcher){
+  let best = null;
+  for(const e of events){
+    if(!matcher(e)) continue;
+    if(e.date > todayISO()) continue; // only count events up to today
+    if(!e.completed) continue; // only a confirmed-complete visit satisfies the requirement
+    if(!best || e.date > best.date) best = e;
+  }
+  return best;
+}
+function nextEventFor(events, matcher){
+  let best = null;
+  for(const e of events){
+    if(!matcher(e)) continue;
+    if(e.date < todayISO()) continue; // only future/today events count as "scheduled"
+    if(!best || e.date < best.date) best = e;
+  }
+  return best;
+}
+
+function statusFor(lastISO, freqDays, createdAtISO, nextScheduledISO){
+  const today = todayISO();
+  const neverLogged = !lastISO;
+  // If never logged, the clock starts from when the record was added (a fair grace period)
+  // rather than flagging brand-new technicians/sites as instantly overdue.
+  const anchor = lastISO || (createdAtISO ? createdAtISO.slice(0,10) : today);
+  const dueISO = isoAddDays(anchor, freqDays);
+  const diff = daysBetween(today, dueISO); // days until due (negative = overdue)
+  // A visit already on the board (even in the future) means nothing needs chasing right now —
+  // surface it as "scheduled" rather than an alarming/uninformative overdue or never-logged badge.
+  if(nextScheduledISO && (neverLogged || diff <= 7)){
+    return { state:'scheduled', lastISO, dueISO, scheduledISO: nextScheduledISO, overdueBy:0, neverLogged, label:`Scheduled ${humanDateShort(nextScheduledISO)}` };
+  }
+  const prefix = neverLogged ? 'Never logged — ' : '';
+  if(diff < 0) return { state:'overdue', lastISO, dueISO, overdueBy:-diff, neverLogged, label:`${prefix}Overdue by ${-diff}d` };
+  if(diff <= 7) return { state:'due', lastISO, dueISO, overdueBy:0, neverLogged, label: `${prefix}${diff===0 ? 'Due today' : `Due in ${diff}d`}` };
+  return { state:'ok', lastISO, dueISO, overdueBy:0, neverLogged, label:`${prefix}Due ${humanDateShort(dueISO)}` };
+}
+
+function techVisitStatus(tech){
+  const last = lastEventFor(state.cache.events, e => e.type==='techVisit' && e.technicianId===tech.id);
+  const next = nextEventFor(state.cache.events, e => e.type==='techVisit' && e.technicianId===tech.id);
+  return statusFor(last?.date, tech.techFrequencyDays||30, tech.createdAt, next?.date);
+}
+function oneOnOneStatus(tech){
+  const last = lastEventFor(state.cache.events, e => e.type==='oneOnOne' && e.technicianId===tech.id);
+  const next = nextEventFor(state.cache.events, e => e.type==='oneOnOne' && e.technicianId===tech.id);
+  return statusFor(last?.date, tech.oneOnOneFrequencyDays||30, tech.createdAt, next?.date);
+}
+function siteQAStatus(site){
+  if(!site.qaFrequencyDays) return null; // no fixed schedule
+  const last = lastEventFor(state.cache.events, e => e.type==='qaVisit' && e.siteId===site.id);
+  const next = nextEventFor(state.cache.events, e => e.type==='qaVisit' && e.siteId===site.id);
+  return statusFor(last?.date, site.qaFrequencyDays, site.createdAt, next?.date);
+}
+
+function weekEvents(weekStartDate){
+  const startISO = toISO(weekStartDate);
+  const endISO = toISO(addDays(weekStartDate,6));
+  return state.cache.events.filter(e => e.date >= startISO && e.date <= endISO);
+}
+function weeklyKPI(weekStartDate){
+  const evs = weekEvents(weekStartDate);
+  const count = t => evs.filter(e=>e.type===t).length;
+  return {
+    techVisits: count('techVisit'),
+    qaVisits: count('qaVisit'),
+    oneOnOnes: count('oneOnOne'),
+    evs
+  };
+}
+
+/* ---------------- generic helpers ---------------- */
+function techName(id){ const t = state.cache.technicians.find(x=>x.id===id); return t? t.name : null; }
+function siteName(id){ const s = state.cache.sites.find(x=>x.id===id); return s? s.name : null; }
+function regionBadge(region){ const r = REGIONS[region]; return r ? `<span class="badge ${r.badge}">${r.label}</span>` : ''; }
+function escapeHTML(s){ return (s??'').toString().replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function toast(msg){
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(()=>{ el.hidden = true; }, 2400);
+}
+
+/* ---------------- modal ---------------- */
+function showModal(titleHTML, bodyHTML, footHTML, opts){
+  const backdrop = document.getElementById('modalBackdrop');
+  const modal = document.getElementById('modal');
+  modal.className = (opts && opts.wide) ? 'modal modal-wide' : 'modal';
+  modal.innerHTML = `
+    <div class="modal-head"><h3>${titleHTML}</h3><button class="modal-close" id="modalCloseBtn" aria-label="Close">✕</button></div>
+    <div class="modal-body">${bodyHTML}</div>
+    <div class="modal-foot">${footHTML||''}</div>
+  `;
+  backdrop.hidden = false;
+  document.getElementById('modalCloseBtn').onclick = closeModal;
+  backdrop.onclick = (e)=>{ if(e.target===backdrop) closeModal(); };
+}
+function closeModal(){ document.getElementById('modalBackdrop').hidden = true; }
+
+/* ---------------- routing ---------------- */
+const ROUTE_TITLES = { dashboard:'Dashboard', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', search:'Search', settings:'Settings' };
+
+function navigate(route){
+  state.route = route;
+  location.hash = route;
+  document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active', b.dataset.route===route));
+  document.getElementById('topbarTitle').textContent = ROUTE_TITLES[route] || '';
+  document.getElementById('app').classList.remove('nav-open');
+  render();
+}
+
+async function render(){
+  const main = document.getElementById('main');
+  await refreshCache();
+  switch(state.route){
+    case 'dashboard': main.innerHTML = renderDashboard(); mountDashboard(); break;
+    case 'schedule': main.innerHTML = renderSchedule(); mountSchedule(); break;
+    case 'technicians': main.innerHTML = renderTechnicians(); mountTechnicians(); break;
+    case 'sites': main.innerHTML = renderSites(); mountSites(); break;
+    case 'search': main.innerHTML = renderSearch(); mountSearch(); break;
+    case 'settings': main.innerHTML = renderSettings(); mountSettings(); break;
+    default: main.innerHTML = renderDashboard(); mountDashboard();
+  }
+}
+
+/* ================= DASHBOARD ================= */
+function renderDashboard(){
+  const techs = state.cache.technicians.filter(t=>t.active);
+  const sites = state.cache.sites.filter(s=>s.active);
+  const kpi = weeklyKPI(state.weekStart);
+  const s = state.cache.settings || { techVisitsPerWeekMin:3, qaVisitsPerWeekMin:4 };
+  const totalEvents = state.cache.events.length;
+
+  const techStatuses = techs.map(t=>({ t, tv: techVisitStatus(t), oo: oneOnOneStatus(t) }));
+  const overdueTech = techStatuses.filter(x=>x.tv.state==='overdue' || x.oo.state==='overdue');
+  const dueSoonTech = techStatuses.filter(x=> (x.tv.state==='due' || x.oo.state==='due') && !(x.tv.state==='overdue'||x.oo.state==='overdue'));
+
+  const siteStatuses = sites.map(s=>({ s, qa: siteQAStatus(s) })).filter(x=>x.qa);
+  const overdueSite = siteStatuses.filter(x=>x.qa.state==='overdue');
+  const dueSoonSite = siteStatuses.filter(x=>x.qa.state==='due');
+
+  const pct = (v,min) => Math.min(100, Math.round((v/Math.max(min,1))*100));
+
+  function watchRow(name, sub, badgeHTML, onDataset){
+    return `<div class="watch-row" ${onDataset}>
+      <div><div class="watch-name">${escapeHTML(name)}</div><div class="watch-meta">${sub}</div></div>
+      <div class="watch-spacer"></div>${badgeHTML}
+    </div>`;
+  }
+
+  const overdueTechRows = overdueTech.length ? overdueTech.map(x=>{
+    const bits = [];
+    if(x.tv.state==='overdue') bits.push(`Tech visit ${x.tv.label.toLowerCase()}`);
+    if(x.oo.state==='overdue') bits.push(`1-1 ${x.oo.label.toLowerCase()}`);
+    return watchRow(x.t.name, bits.join(' · '), `<span class="badge badge-overdue">Overdue</span>`, `data-open-tech="${x.t.id}"`);
+  }).join('') : `<div class="empty" style="padding:22px;"><p>Nothing overdue. Nicely kept.</p></div>`;
+
+  const dueSoonTechRows = dueSoonTech.length ? dueSoonTech.map(x=>{
+    const bits = [];
+    if(x.tv.state==='due') bits.push(`Tech visit ${x.tv.label.toLowerCase()}`);
+    if(x.oo.state==='due') bits.push(`1-1 ${x.oo.label.toLowerCase()}`);
+    return watchRow(x.t.name, bits.join(' · '), `<span class="badge badge-due">Due soon</span>`, `data-open-tech="${x.t.id}"`);
+  }).join('') : `<div class="empty" style="padding:22px;"><p>Nothing due in the next 7 days.</p></div>`;
+
+  const overdueSiteRows = overdueSite.length ? overdueSite.map(x=>
+    watchRow(x.s.name, `QA visit ${x.qa.label.toLowerCase()}`, `<span class="badge badge-overdue">Overdue</span>`, `data-open-site="${x.s.id}"`)
+  ).join('') : `<div class="empty" style="padding:22px;"><p>No QA sites overdue.</p></div>`;
+
+  const dueSoonSiteRows = dueSoonSite.length ? dueSoonSite.map(x=>
+    watchRow(x.s.name, `QA visit ${x.qa.label.toLowerCase()}`, `<span class="badge badge-due">Due soon</span>`, `data-open-site="${x.s.id}"`)
+  ).join('') : '';
+
+  const missedEvents = state.cache.events
+    .filter(e=> e.date < todayISO() && !e.completed && ['techVisit','qaVisit','oneOnOne'].includes(e.type))
+    .sort((a,b)=> a.date.localeCompare(b.date));
+  const outstandingRows = missedEvents.length ? missedEvents.slice(0,8).map(e=>{
+    const t = EVENT_TYPES[e.type] || EVENT_TYPES.other;
+    const who = e.technicianId ? techName(e.technicianId) : null;
+    const where = e.siteId ? siteName(e.siteId) : null;
+    const label = e.title || who || where || t.label;
+    return `<div class="watch-row" data-open-event="${e.id}">
+      <div><div class="watch-name">${escapeHTML(label)}</div><div class="watch-meta">${t.label} · was due ${humanDate(e.date)}</div></div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-toggle-complete="${e.id}">Mark done</button>
+    </div>`;
+  }).join('') + (missedEvents.length>8 ? `<div style="padding:10px 12px;"><a href="#search" data-goto-missed="1" style="font-size:12px;color:var(--forest-dim);font-weight:600;">View all ${missedEvents.length} outstanding →</a></div>` : '')
+    : `<div class="empty" style="padding:22px;"><p>Nothing outstanding — everything logged is confirmed done.</p></div>`;
+
+  return `
+  <div class="view-head">
+    <div>
+      <h1>Dashboard</h1>
+      <div class="view-sub">Week of ${humanDate(toISO(state.weekStart))} — overview across ${techs.length} technician${techs.length===1?'':'s'} and ${sites.length} client site${sites.length===1?'':'s'}</div>
+    </div>
+    <div class="view-actions">
+      <button class="btn btn-outline" data-route="schedule">Open weekly board</button>
+      <button class="btn" id="dashAddEvent">+ Log a visit</button>
+    </div>
+  </div>
+
+  ${totalEvents===0 ? `
+  <div class="card card-pad" style="margin-bottom:22px; display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; border-left:3px solid var(--forest-dim);">
+    <div>
+      <h3 style="font-size:15px;margin-bottom:4px;">Nothing on the board yet</h3>
+      <p style="font-size:12.5px;color:var(--text-dim);max-width:520px;">
+        Generate a schedule to fill in tech visits, QA visits and 1-1s against your monthly and weekly targets —
+        it groups technicians by zone and puts 1-1s on your WFH day automatically.
+      </p>
+    </div>
+    <button class="btn" id="dashGenerate">✦ Generate schedule</button>
+  </div>` : ''}
+
+  <div class="kpi-grid">
+    <div class="card kpi-card">
+      <div class="kpi-label">Tech visits this week</div>
+      <div class="kpi-value">${kpi.techVisits} <span style="font-size:15px;color:var(--text-dim);">/ ${s.techVisitsPerWeekMin} min</span></div>
+      <div class="kpi-bar"><div class="kpi-bar-fill ${kpi.techVisits<s.techVisitsPerWeekMin?'short':''}" style="width:${pct(kpi.techVisits,s.techVisitsPerWeekMin)}%"></div></div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-label">QA visits this week</div>
+      <div class="kpi-value">${kpi.qaVisits} <span style="font-size:15px;color:var(--text-dim);">/ ${s.qaVisitsPerWeekMin} min</span></div>
+      <div class="kpi-bar"><div class="kpi-bar-fill ${kpi.qaVisits<s.qaVisitsPerWeekMin?'short':''}" style="width:${pct(kpi.qaVisits,s.qaVisitsPerWeekMin)}%"></div></div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-label">1-1s logged this week</div>
+      <div class="kpi-value">${kpi.oneOnOnes}</div>
+      <div class="kpi-note">${overdueTech.filter(x=>x.oo.state==='overdue').length} technician(s) overdue a 1-1 overall</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-label">Outstanding visits</div>
+      <div class="kpi-value" style="color:${missedEvents.length?'var(--clay)':'var(--ink)'}">${missedEvents.length}</div>
+      <div class="kpi-note">Past visits not yet confirmed done</div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-label">Overdue items</div>
+      <div class="kpi-value" style="color:${(overdueTech.length+overdueSite.length)?'var(--clay)':'var(--ink)'}">${overdueTech.length+overdueSite.length}</div>
+      <div class="kpi-note">${overdueTech.length} technician · ${overdueSite.length} site</div>
+    </div>
+  </div>
+
+  <div class="dash-grid">
+    <div>
+      <div class="card" style="margin-bottom:16px;">
+        <div class="panel-title"><h3>Outstanding — needs confirming</h3></div>
+        <div class="panel-body">${outstandingRows}</div>
+      </div>
+      <div class="card" style="margin-bottom:16px;">
+        <div class="panel-title"><h3>Overdue — technicians</h3></div>
+        <div class="panel-body">${overdueTechRows}</div>
+      </div>
+      <div class="card">
+        <div class="panel-title"><h3>Overdue — QA sites</h3></div>
+        <div class="panel-body">${overdueSiteRows}</div>
+      </div>
+    </div>
+    <div>
+      <div class="card" style="margin-bottom:16px;">
+        <div class="panel-title"><h3>Due within 7 days</h3></div>
+        <div class="panel-body">${dueSoonTechRows}${dueSoonSiteRows}</div>
+      </div>
+      <div class="card">
+        <div class="panel-title"><h3>Thames key</h3></div>
+        <div class="panel-body" style="padding:14px 18px;">
+          <p style="font-size:12.5px;color:var(--text-dim);line-height:1.7;">
+            Technicians are grouped by where their sites sit relative to the river, so you can plan
+            back-to-back visits without crossing town.<br><br>
+            <span class="badge badge-east">East · North bank</span> Adien · Finlay · Katherine · Larisa · Remi<br><br>
+            <span class="badge badge-west">West · South bank</span> Carlos · James<br><br>
+            <span class="badge badge-floating">Floating</span> Ella — covers all London zones<br><br>
+            <span class="badge badge-outside">Outside London</span> Helen · Kathryn · Marie
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+  `;
+}
+function mountDashboard(){
+  document.querySelectorAll('[data-route]').forEach(b=>b.addEventListener('click', ()=>navigate(b.dataset.route)));
+  document.getElementById('dashAddEvent')?.addEventListener('click', ()=>openEventForm({ date: todayISO() }));
+  document.getElementById('dashGenerate')?.addEventListener('click', ()=>openGenerateModal());
+  document.querySelectorAll('[data-open-tech]').forEach(el=>el.addEventListener('click', ()=>openTechnicianForm(Number(el.dataset.openTech))));
+  document.querySelectorAll('[data-open-site]').forEach(el=>el.addEventListener('click', ()=>openSiteForm(Number(el.dataset.openSite))));
+  document.querySelectorAll('[data-open-event]').forEach(el=>el.addEventListener('click', ()=>openEventForm(null, Number(el.dataset.openEvent))));
+  document.querySelectorAll('[data-toggle-complete]').forEach(b=>b.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    toggleEventComplete(Number(b.dataset.toggleComplete));
+  }));
+  document.querySelector('[data-goto-missed]')?.addEventListener('click', (e)=>{
+    e.preventDefault();
+    state.searchTimeFilter = 'missed';
+    state.searchTypeFilter = 'all';
+    state.searchQuery = '';
+    navigate('search');
+  });
+}
+
+/* ================= WEEKLY BOARD ================= */
+function renderSchedule(){
+  const ws = state.weekStart;
+  const days = Array.from({length:7}, (_,i)=>addDays(ws,i));
+  const todayIso = todayISO();
+  const s = state.cache.settings || { wfhWeekday:3 };
+
+  const dayCols = days.map((d,i)=>{
+    const iso = toISO(d);
+    const isToday = iso === todayIso;
+    const isWeekend = i>=5;
+    const evs = state.cache.events.filter(e=>e.date===iso).sort((a,b)=>(a.time||'').localeCompare(b.time||''));
+    const evHTML = evs.map(e=>eventTagHTML(e)).join('');
+    return `
+    <div class="day-sheet ${isToday?'is-today':''} ${isWeekend?'is-weekend':''}">
+      <div class="day-head">
+        <div><div class="day-name">${DOW_SHORT[i]}${(i+1)===s.wfhWeekday?' · WFH':''}</div><div class="day-num">${d.getDate()}</div></div>
+      </div>
+      <div class="day-events">${evHTML}</div>
+      <button class="day-add" data-add-day="${iso}">+ Add</button>
+    </div>`;
+  }).join('');
+
+  return `
+  <div class="view-head">
+    <div>
+      <h1>Weekly board</h1>
+      <div class="view-sub">${monthLabel(ws)} — plan tech visits, QA visits and 1-1s across the week</div>
+    </div>
+    <div class="view-actions">
+      <div class="week-nav">
+        <button class="btn btn-outline" id="wkPrev">‹ Prev</button>
+        <button class="btn btn-outline" id="wkToday">This week</button>
+        <button class="btn btn-outline" id="wkNext">Next ›</button>
+      </div>
+      <button class="btn btn-outline" id="genScheduleBtn">✦ Generate schedule</button>
+      <button class="btn" id="addEventBtn">+ Add event</button>
+    </div>
+  </div>
+  <div class="board">${dayCols}</div>
+  `;
+}
+function eventTagHTML(e){
+  const t = EVENT_TYPES[e.type] || EVENT_TYPES.other;
+  const who = e.technicianId ? techName(e.technicianId) : null;
+  const where = e.siteId ? siteName(e.siteId) : null;
+  const title = e.title || who || where || t.label;
+  const metaBits = [who && where ? where : null, e.time || null].filter(Boolean);
+  const isMissed = !e.completed && e.date < todayISO();
+  return `<div class="event-tag type-${e.type} ${e.completed?'is-done':''} ${isMissed?'is-missed':''}" data-open-event="${e.id}">
+    <button class="et-check" data-toggle-complete="${e.id}" title="${e.completed?'Mark not done':'Mark done'}" aria-label="Toggle complete">✓</button>
+    <div class="et-body">
+      <div class="et-type">${t.short}${isMissed?' · Missed':''}</div>
+      <div class="et-title">${escapeHTML(title)}</div>
+      ${metaBits.length? `<div class="et-meta">${metaBits.map(escapeHTML).join(' · ')}</div>`:''}
+    </div>
+  </div>`;
+}
+async function toggleEventComplete(id){
+  const ev = state.cache.events.find(e=>e.id===id);
+  if(!ev) return;
+  await DB.put('events', { ...ev, completed: !ev.completed });
+  render();
+}
+function mountSchedule(){
+  document.getElementById('wkPrev').addEventListener('click', ()=>{ state.weekStart = addDays(state.weekStart,-7); render(); });
+  document.getElementById('wkNext').addEventListener('click', ()=>{ state.weekStart = addDays(state.weekStart,7); render(); });
+  document.getElementById('wkToday').addEventListener('click', ()=>{ state.weekStart = mondayOf(new Date()); render(); });
+  document.getElementById('addEventBtn').addEventListener('click', ()=>openEventForm({ date: toISO(state.weekStart) }));
+  document.getElementById('genScheduleBtn').addEventListener('click', ()=>openGenerateModal());
+  document.querySelectorAll('[data-add-day]').forEach(b=>b.addEventListener('click', ()=>openEventForm({ date:b.dataset.addDay })));
+  document.querySelectorAll('[data-open-event]').forEach(b=>b.addEventListener('click', ()=>openEventForm(null, Number(b.dataset.openEvent))));
+  document.querySelectorAll('[data-toggle-complete]').forEach(b=>b.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    toggleEventComplete(Number(b.dataset.toggleComplete));
+  }));
+}
+
+/* ---------- event form ---------- */
+function openEventForm(defaults, editId){
+  const isEdit = !!editId;
+  const existing = isEdit ? state.cache.events.find(e=>e.id===editId) : null;
+  const v = existing || { date: defaults?.date || todayISO(), type:'techVisit', technicianId:'', siteId:'', title:'', time:'', notes:'', completed: (defaults?.date || todayISO()) <= todayISO() };
+
+  const techOptions = state.cache.technicians.filter(t=>t.active).map(t=>`<option value="${t.id}" ${v.technicianId==t.id?'selected':''}>${escapeHTML(t.name)}</option>`).join('');
+  const siteOptions = state.cache.sites.filter(s=>s.active).map(s=>`<option value="${s.id}" ${v.siteId==s.id?'selected':''}>${escapeHTML(s.name)}</option>`).join('');
+  const typeOptions = Object.entries(EVENT_TYPES).map(([k,t])=>`<option value="${k}" ${v.type===k?'selected':''}>${t.label}</option>`).join('');
+
+  const body = `
+    <div class="field-row">
+      <div class="field"><label>Date</label><input type="date" id="fDate" value="${v.date}"></div>
+      <div class="field"><label>Time (optional)</label><input type="time" id="fTime" value="${v.time||''}"></div>
+    </div>
+    <div class="field"><label>Type</label><select id="fType">${typeOptions}</select></div>
+    <div class="field" id="fTechWrap"><label>Technician</label><select id="fTech"><option value="">—</option>${techOptions}</select></div>
+    <div class="field" id="fSiteWrap"><label>Client site <span style="font-weight:400;text-transform:none;color:var(--text-faint);">(optional for QA — leave blank to fill in later)</span></label><select id="fSite"><option value="">—</option>${siteOptions}</select></div>
+    <div class="field" id="fTitleWrap"><label>Label</label><input id="fTitle" placeholder="e.g. Site audit, troubleshooting…" value="${escapeHTML(v.title)}"></div>
+    <div class="field"><label>Notes</label><textarea id="fNotes" placeholder="Jobs covered, outcomes, follow-ups…">${escapeHTML(v.notes)}</textarea></div>
+    <div class="field"><label><input type="checkbox" id="fCompleted" ${v.completed?'checked':''} style="width:auto;"> Completed</label>
+      <div class="freq-hint">Unticked visits in the past show up as "missed" and don't count toward monthly/QA cadence tracking.</div>
+    </div>
+  `;
+  const foot = `
+    ${isEdit ? `<button class="btn btn-danger" id="fDelete">Delete</button>` : `<span></span>`}
+    <div class="modal-foot-right">
+      <button class="btn btn-outline" id="fCancel">Cancel</button>
+      <button class="btn" id="fSave">${isEdit?'Save changes':'Add to board'}</button>
+    </div>
+  `;
+  showModal(isEdit ? 'Edit event' : 'Add event', body, foot);
+
+  function syncVisibility(){
+    const type = document.getElementById('fType').value;
+    document.getElementById('fTechWrap').style.display = (type==='techVisit'||type==='oneOnOne'||type==='qaVisit') ? '' : 'none';
+    document.getElementById('fSiteWrap').style.display = (type==='qaVisit'||type==='techVisit') ? '' : 'none';
+  }
+  document.getElementById('fType').addEventListener('change', syncVisibility);
+  syncVisibility();
+
+  document.getElementById('fCancel').addEventListener('click', closeModal);
+  document.getElementById('fDelete')?.addEventListener('click', async ()=>{
+    await DB.delete('events', editId);
+    closeModal(); toast('Event deleted'); render();
+  });
+  document.getElementById('fSave').addEventListener('click', async ()=>{
+    const type = document.getElementById('fType').value;
+    const techId = document.getElementById('fTech').value;
+    const siteId = document.getElementById('fSite').value;
+    const obj = {
+      date: document.getElementById('fDate').value,
+      time: document.getElementById('fTime').value,
+      type,
+      technicianId: techId ? Number(techId) : null,
+      siteId: siteId ? Number(siteId) : null,
+      title: document.getElementById('fTitle').value.trim(),
+      notes: document.getElementById('fNotes').value.trim(),
+      completed: document.getElementById('fCompleted').checked,
+      createdAt: existing?.createdAt || new Date().toISOString(),
+    };
+    if(!obj.date){ toast('Pick a date first'); return; }
+    if((type==='techVisit'||type==='oneOnOne') && !obj.technicianId){ toast('Pick a technician'); return; }
+    if(type==='qaVisit' && !obj.siteId && !obj.title){ obj.title = 'Site TBC'; }
+    if(isEdit) obj.id = editId;
+    await DB.put('events', obj);
+    closeModal(); toast(isEdit? 'Event updated':'Event added'); render();
+  });
+}
+
+/* ================= SCHEDULE GENERATOR =================
+   Fills a date range with tech visits, QA visits and 1-1s:
+   - every active technician gets at least one tech visit and one 1-1
+     (using each technician's own frequency, most-overdue first)
+   - every active QA site with a cadence gets at least one visit
+   - weekly totals are topped up to meet the KPI minimums in Settings
+   - technicians are grouped by zone so a day's visits sit close together
+   - 1-1s are placed on the WFH day first (they're done over Teams)
+   Existing entries are left in place unless "replace" is chosen; annual
+   leave is always preserved.
+   ========================================================= */
+function openGenerateModal(){
+  const defaultStart = toISO(mondayOf(state.weekStart));
+  const body = `
+    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:14px;line-height:1.6;">
+      Fills the board to hit your monthly and weekly targets — grouping technicians by zone so you're
+      not crossing town, and putting 1-1s on your WFH day since those run over Teams. Existing entries
+      are left alone unless you choose to replace them; annual leave is always kept.
+    </p>
+    <div class="field-row">
+      <div class="field"><label>Start week (Monday)</label><input type="date" id="gStart" value="${defaultStart}"></div>
+      <div class="field"><label>Number of weeks</label><input type="number" id="gWeeks" value="4" min="1" max="12"></div>
+    </div>
+    <div class="field"><label><input type="checkbox" id="gOverwrite" style="width:auto;"> Replace existing entries in this range</label></div>
+  `;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="gCancel">Cancel</button><button class="btn" id="gRun">Generate</button></div>`;
+  showModal('Generate schedule', body, foot);
+  document.getElementById('gCancel').addEventListener('click', closeModal);
+  document.getElementById('gRun').addEventListener('click', async ()=>{
+    const startVal = document.getElementById('gStart').value;
+    if(!startVal){ toast('Pick a start date'); return; }
+    const weeks = Math.max(1, Math.min(12, Number(document.getElementById('gWeeks').value)||4));
+    const overwrite = document.getElementById('gOverwrite').checked;
+    const startISO = toISO(mondayOf(fromISO(startVal)));
+    const runBtn = document.getElementById('gRun');
+    runBtn.disabled = true; runBtn.textContent = 'Generating…';
+    const result = await generateSchedule({ startISO, weeks, overwrite });
+    closeModal();
+    state.weekStart = fromISO(startISO);
+    toast(`Added ${result.techVisits} tech visits, ${result.qaVisits} QA visits, ${result.oneOnOnes} 1-1s`);
+    navigate('schedule');
+  });
+}
+
+async function generateSchedule({ startISO, weeks, overwrite }){
+  await refreshCache();
+  const settings = state.cache.settings || { wfhWeekday:3, techVisitsPerWeekMin:3, qaVisitsPerWeekMin:4 };
+  const startD = fromISO(startISO);
+  const totalDays = weeks*7;
+  const endISO = toISO(addDays(startD, totalDays-1));
+
+  if(overwrite){
+    const toDelete = state.cache.events.filter(e=> e.date>=startISO && e.date<=endISO && e.type!=='leave');
+    for(const e of toDelete) await DB.delete('events', e.id);
+    await refreshCache();
+  }
+
+  const rangeEvents = state.cache.events.filter(e=> e.date>=startISO && e.date<=endISO);
+  const leaveDates = new Set(rangeEvents.filter(e=>e.type==='leave').map(e=>e.date));
+
+  // ---- build the working-day calendar for the range ----
+  const days = [];
+  for(let i=0;i<totalDays;i++){
+    const d = addDays(startD,i);
+    const dow = d.getDay(); // 0 Sun .. 6 Sat
+    if(dow===0||dow===6) continue;
+    const iso = toISO(d);
+    if(leaveDates.has(iso)) continue;
+    const mondayDow = dow===0?7:dow; // 1..7, Mon=1
+    days.push({ iso, isWFH: mondayDow===settings.wfhWeekday, weekKey: toISO(mondayOf(d)) });
+  }
+  if(days.length===0) return { techVisits:0, qaVisits:0, oneOnOnes:0 };
+  const workDays = days.filter(d=>!d.isWFH);
+  const wfhDays = days.filter(d=>d.isWFH);
+  const weekKeys = [...new Set(days.map(d=>d.weekKey))];
+  const isoToWeek = {}; days.forEach(d=> isoToWeek[d.iso]=d.weekKey);
+  const techById = {}; state.cache.technicians.forEach(t=> techById[t.id]=t);
+
+  const dayMap = {};
+  days.forEach(d=> dayMap[d.iso] = { techIds:new Set(), siteIds:new Set(), ooTechIds:new Set(), techCount:0, qaCount:0, ooCount:0, soloLock:false, kind:null });
+  const weeklyTechCount = {}; weekKeys.forEach(wk=> weeklyTechCount[wk]=0);
+  const weeklyQACount = {}; weekKeys.forEach(wk=> weeklyQACount[wk]=0);
+  const weeklyOOCount = {}; weekKeys.forEach(wk=> weeklyOOCount[wk]=0);
+  rangeEvents.forEach(e=>{
+    const dm = dayMap[e.date]; if(!dm) return;
+    if(e.type==='techVisit'){
+      dm.techCount++; if(e.technicianId) dm.techIds.add(e.technicianId);
+      if(techById[e.technicianId]?.region==='outside') dm.soloLock = true;
+      dm.kind = 'tech';
+      const wk = isoToWeek[e.date]; if(wk!=null) weeklyTechCount[wk] = (weeklyTechCount[wk]||0)+1;
+    }
+    if(e.type==='qaVisit'){
+      dm.qaCount++; if(e.siteId) dm.siteIds.add(e.siteId);
+      if(!dm.kind) dm.kind = 'qa';
+      const wk = isoToWeek[e.date]; if(wk!=null) weeklyQACount[wk] = (weeklyQACount[wk]||0)+1;
+    }
+    if(e.type==='oneOnOne'){
+      dm.ooCount++; if(e.technicianId) dm.ooTechIds.add(e.technicianId);
+      const wk = isoToWeek[e.date]; if(wk!=null) weeklyOOCount[wk] = (weeklyOOCount[wk]||0)+1;
+    }
+  });
+
+  // Tech visits and QA visits both cap out at the weekly KPI figure (it's a target, not a floor to
+  // exceed); outside-London technicians always get a day to themselves; 1-1s cap at 2/day and at the
+  // weekly max in Settings; a working day is either a tech-visit day or a QA-visit day, never both —
+  // QA days can still take a 1-1 alongside, tech-visit days can't.
+  const MAX_TECH_PER_DAY = 2;
+  const MAX_QA_PER_DAY = 2; // soft cap — used when there's room to spread QA visits across days
+  const QA_DAY_CAP_HARD = Math.max(MAX_QA_PER_DAY, settings.qaVisitsPerWeekMin); // relaxed cap so the
+  // weekly QA target is always reachable even when tech visits (or outside-London solo days) have
+  // claimed most of the week's days — matches real practice (e.g. 4 QA visits in a single day).
+  const MAX_OO_PER_DAY = 2;
+  const MAX_OO_PER_WEEK = settings.oneOnOnesPerWeekMax || 3;
+  const OO_TIMES = ['10:00','11:30','13:00','14:30'];
+  const generalSite = state.cache.sites.find(s=>s.isGeneral && s.active);
+
+  const newEvents = [];
+  function addEvent(iso, type, extra){
+    const dm = dayMap[iso];
+    if(!dm) return false;
+    if(type==='techVisit'){
+      const wk = isoToWeek[iso];
+      if((weeklyTechCount[wk]||0) >= settings.techVisitsPerWeekMin) return false;
+      if(dm.kind==='qa') return false; // keep tech-visit days separate from QA-visit days
+      if(dm.soloLock) return false;
+      const tech = techById[extra.technicianId];
+      const isOutside = tech && tech.region==='outside';
+      if(isOutside){ if(dm.techCount>0) return false; }
+      else if(dm.techCount>=MAX_TECH_PER_DAY) return false;
+      if(extra.technicianId && dm.techIds.has(extra.technicianId)) return false;
+    } else if(type==='qaVisit'){
+      const wk = isoToWeek[iso];
+      if((weeklyQACount[wk]||0) >= settings.qaVisitsPerWeekMin) return false;
+      if(dm.kind==='tech') return false; // keep QA-visit days separate from tech-visit days
+      if(dm.qaCount>=(extra.relaxedCap?QA_DAY_CAP_HARD:MAX_QA_PER_DAY) || (extra.siteId && !extra.allowDuplicateSite && dm.siteIds.has(extra.siteId))) return false;
+    } else if(type==='oneOnOne'){
+      const wk = isoToWeek[iso];
+      if((weeklyOOCount[wk]||0) >= MAX_OO_PER_WEEK) return false;
+      if(dm.kind==='tech') return false; // 1-1s pair with QA days (or WFH), not tech-visit days
+      if(dm.ooCount>=MAX_OO_PER_DAY || (extra.technicianId && dm.ooTechIds.has(extra.technicianId))) return false;
+    }
+    newEvents.push({ date:iso, type, technicianId:extra.technicianId||null, siteId:extra.siteId||null, time:extra.time||'', title:extra.title||'', notes:'Auto-generated', completed: iso<=todayISO(), createdAt:new Date().toISOString() });
+    if(type==='techVisit'){
+      dm.techCount++; if(extra.technicianId) dm.techIds.add(extra.technicianId);
+      if(techById[extra.technicianId]?.region==='outside') dm.soloLock = true;
+      dm.kind = 'tech';
+      const wk = isoToWeek[iso]; weeklyTechCount[wk] = (weeklyTechCount[wk]||0)+1;
+    }
+    if(type==='qaVisit'){
+      dm.qaCount++; if(extra.siteId) dm.siteIds.add(extra.siteId);
+      if(!dm.kind) dm.kind = 'qa';
+      const wk = isoToWeek[iso]; weeklyQACount[wk] = (weeklyQACount[wk]||0)+1;
+    }
+    if(type==='oneOnOne'){
+      dm.ooCount++; if(extra.technicianId) dm.ooTechIds.add(extra.technicianId);
+      const wk = isoToWeek[iso]; weeklyOOCount[wk] = (weeklyOOCount[wk]||0)+1;
+    }
+    return true;
+  }
+
+  const techs = state.cache.technicians.filter(t=>t.active);
+  const sites = state.cache.sites.filter(s=>s.active && s.qaFrequencyDays && !s.isGeneral);
+
+  /* ---- Tech visits: block-schedule by zone, most-overdue first (first pass = monthly cover) ---- */
+  const regionOrder = ['east','west','outside','floating'];
+  const tvBuckets = { east:[], west:[], outside:[], floating:[] };
+  techs.map(t=>({t, st:techVisitStatus(t)}))
+    .sort((a,b)=> a.st.dueISO.localeCompare(b.st.dueISO))
+    .forEach(x => { (tvBuckets[x.t.region]||tvBuckets.floating).push(x); });
+
+  if(workDays.length){
+    let cursor = 0;
+    for(const region of regionOrder){
+      const bucket = tvBuckets[region];
+      let guard = 0;
+      while(bucket.length && cursor < workDays.length && guard < 5000){
+        guard++;
+        const day = workDays[cursor % workDays.length];
+        const item = bucket[0];
+        if(addEvent(day.iso, 'techVisit', { technicianId:item.t.id })){
+          bucket.shift();
+          // fill this day up to the cap before moving on (outside-London solo days are full after one)
+          if(dayMap[day.iso].techCount>=MAX_TECH_PER_DAY || dayMap[day.iso].soloLock) cursor++;
+        } else {
+          cursor++;
+        }
+        if(cursor > workDays.length*6) break; // out of room in this range
+      }
+    }
+    // top up weeks that are still under the weekly target (but never over it — addEvent enforces the cap)
+    const topup = techs.map(t=>({t, st:techVisitStatus(t)})).sort((a,b)=> a.st.dueISO.localeCompare(b.st.dueISO));
+    for(const wk of weekKeys){
+      const weekDays = workDays.filter(d=>d.weekKey===wk);
+      let qi=0, guard=0;
+      while((weeklyTechCount[wk]||0) < settings.techVisitsPerWeekMin && guard<300 && weekDays.length){
+        guard++;
+        const item = topup[qi % topup.length]; qi++;
+        const day = weekDays.find(d=>{
+          const dm = dayMap[d.iso];
+          if(dm.soloLock || dm.kind==='qa') return false;
+          if(item.t.region==='outside') return dm.techCount===0;
+          return dm.techCount<MAX_TECH_PER_DAY && !dm.techIds.has(item.t.id);
+        });
+        if(!day) { if(qi>topup.length*3) break; continue; }
+        addEvent(day.iso,'techVisit',{technicianId:item.t.id});
+      }
+    }
+  }
+
+  /* ---- QA visits: same zone block-scheduling, first pass = each due site once ---- */
+  const qaBuckets = { east:[], west:[], outside:[], floating:[] };
+  sites.map(s=>({s, st:siteQAStatus(s)})).filter(x=>x.st)
+    .sort((a,b)=> a.st.dueISO.localeCompare(b.st.dueISO))
+    .forEach(x => { (qaBuckets[x.s.region]||qaBuckets.floating).push(x); });
+
+  if(workDays.length && sites.length){
+    let cursor = 0;
+    for(const region of regionOrder){
+      const bucket = qaBuckets[region];
+      let guard=0;
+      while(bucket.length && cursor < workDays.length && guard<5000){
+        guard++;
+        const day = workDays[cursor % workDays.length];
+        const item = bucket[0];
+        if(addEvent(day.iso, 'qaVisit', { siteId:item.s.id })){
+          bucket.shift();
+          if(dayMap[day.iso].qaCount>=MAX_QA_PER_DAY) cursor++;
+        } else {
+          cursor++;
+        }
+        if(cursor > workDays.length*6) break;
+      }
+    }
+  }
+  // top up weeks under the weekly QA target: cycle real due sites first, then fall back to a
+  // placeholder "site TBC" entry so the week still reflects the KPI once real sites are added.
+  // Tries to spread across days first (soft cap), then stacks onto whichever day still has room
+  // (relaxed cap) so the weekly target is always hit even when few non-tech days are available.
+  if(workDays.length){
+    const topupSites = sites.map(s=>({s, st:siteQAStatus(s)})).filter(x=>x.st).sort((a,b)=> a.st.dueISO.localeCompare(b.st.dueISO));
+    for(const wk of weekKeys){
+      const weekDays = workDays.filter(d=>d.weekKey===wk);
+      if(!weekDays.length) continue;
+      let qi=0, guard=0;
+      while((weeklyQACount[wk]||0) < settings.qaVisitsPerWeekMin && guard<200){
+        guard++;
+        let placed = false;
+        if(topupSites.length){
+          const item = topupSites[qi % topupSites.length]; qi++;
+          let day = weekDays.find(d=> dayMap[d.iso].kind!=='tech' && dayMap[d.iso].qaCount<MAX_QA_PER_DAY && !dayMap[d.iso].siteIds.has(item.s.id));
+          let relaxedCap = false;
+          if(!day){ day = weekDays.find(d=> dayMap[d.iso].kind!=='tech' && dayMap[d.iso].qaCount<QA_DAY_CAP_HARD && !dayMap[d.iso].siteIds.has(item.s.id)); relaxedCap = true; }
+          if(day) placed = addEvent(day.iso,'qaVisit',{siteId:item.s.id, relaxedCap});
+        }
+        if(!placed){
+          let day = weekDays.find(d=> dayMap[d.iso].kind!=='tech' && dayMap[d.iso].qaCount<MAX_QA_PER_DAY);
+          let relaxedCap = false;
+          if(!day){ day = weekDays.find(d=> dayMap[d.iso].kind!=='tech' && dayMap[d.iso].qaCount<QA_DAY_CAP_HARD); relaxedCap = true; }
+          if(!day) break;
+          const extra = generalSite
+            ? { siteId:generalSite.id, allowDuplicateSite:true, relaxedCap }
+            : { siteId:null, title:'Site TBC', relaxedCap };
+          if(!addEvent(day.iso,'qaVisit',extra)) break;
+        }
+      }
+    }
+  }
+
+  /* ---- 1-1s: WFH day first (Teams call), spill onto working days if needed — capped at 2/day ---- */
+  const ooQueue = techs.map(t=>({t, st:oneOnOneStatus(t)})).sort((a,b)=> a.st.dueISO.localeCompare(b.st.dueISO));
+  for(const wfhDay of wfhDays){
+    let timeIdx = 0;
+    while(ooQueue.length && dayMap[wfhDay.iso].ooCount < MAX_OO_PER_DAY){
+      const item = ooQueue[0];
+      if(addEvent(wfhDay.iso, 'oneOnOne', { technicianId:item.t.id, time:OO_TIMES[timeIdx % OO_TIMES.length] })){
+        ooQueue.shift(); timeIdx++;
+      } else break;
+    }
+  }
+  if(ooQueue.length && workDays.length){
+    // prefer days that already have a QA visit (they pair well); then any day that isn't a tech-visit day
+    const qaKindDays = workDays.filter(d=>dayMap[d.iso].kind==='qa');
+    const freeDays = workDays.filter(d=>!dayMap[d.iso].kind);
+    const spillOrder = [...qaKindDays, ...freeDays];
+    let cursor = 0, guard=0;
+    while(ooQueue.length && spillOrder.length && guard<2000){
+      guard++;
+      const day = spillOrder[cursor % spillOrder.length];
+      const item = ooQueue[0];
+      if(addEvent(day.iso, 'oneOnOne', { technicianId:item.t.id })){
+        ooQueue.shift();
+      }
+      cursor++;
+      if(cursor>spillOrder.length*4) break; // no room left, give up gracefully
+    }
+  }
+
+  for(const ev of newEvents) await DB.add('events', ev);
+
+  return {
+    techVisits: newEvents.filter(e=>e.type==='techVisit').length,
+    qaVisits: newEvents.filter(e=>e.type==='qaVisit').length,
+    oneOnOnes: newEvents.filter(e=>e.type==='oneOnOne').length,
+  };
+}
+
+/* ================= TECHNICIANS ================= */
+function renderTechnicians(){
+  const filter = state.techFilter;
+  let list = state.cache.technicians;
+  if(filter!=='all') list = list.filter(t=>t.region===filter);
+
+  const rows = list.map(t=>{
+    const tv = techVisitStatus(t);
+    const oo = oneOnOneStatus(t);
+    const badge = st => st.state==='overdue' ? `<span class="badge badge-overdue">${st.label}</span>` : st.state==='due' ? `<span class="badge badge-due">${st.label}</span>` : st.state==='scheduled' ? `<span class="badge badge-scheduled">${st.label}</span>` : `<span class="badge badge-ok">${st.label}</span>`;
+    return `<tr data-tech-row="${t.id}">
+      <td><div class="row-name">${escapeHTML(t.name)}</div>${t.area?`<div class="row-sub">${escapeHTML(t.area)}</div>`:''}</td>
+      <td>${regionBadge(t.region)}</td>
+      <td>${badge(tv)}</td>
+      <td>${badge(oo)}</td>
+      <td>${t.active? '' : '<span class="badge badge-neutral">Inactive</span>'}</td>
+      <td><div class="row-actions">
+        <button class="icon-btn" data-edit-tech="${t.id}">Edit</button>
+        <button class="icon-btn" data-del-tech="${t.id}">Remove</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+
+  const filters = ['all','east','west','floating','outside'].map(f=>{
+    const label = f==='all' ? 'All' : REGIONS[f].label;
+    return `<button class="chip ${state.techFilter===f?'active':''}" data-tf="${f}">${label}</button>`;
+  }).join('');
+
+  return `
+  <div class="view-head">
+    <div><h1>Technicians</h1><div class="view-sub">${state.cache.technicians.filter(t=>t.active).length} active · at least one visit and one 1-1 per month each</div></div>
+    <div class="view-actions"><button class="btn" id="addTechBtn">+ Add technician</button></div>
+  </div>
+  <div class="toolbar"><div class="chip-filter">${filters}</div></div>
+  ${list.length ? `<div class="card table-wrap"><table>
+    <thead><tr><th>Name</th><th>Zone</th><th>Tech visit</th><th>1-1</th><th></th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>` : `<div class="card empty"><h3>No technicians in this zone</h3><p>Add one, or clear the filter above.</p></div>`}
+  `;
+}
+function mountTechnicians(){
+  document.getElementById('addTechBtn').addEventListener('click', ()=>openTechnicianForm());
+  document.querySelectorAll('[data-tf]').forEach(b=>b.addEventListener('click', ()=>{ state.techFilter=b.dataset.tf; render(); }));
+  document.querySelectorAll('[data-edit-tech]').forEach(b=>b.addEventListener('click', ()=>openTechnicianForm(Number(b.dataset.editTech))));
+  document.querySelectorAll('[data-del-tech]').forEach(b=>b.addEventListener('click', ()=>confirmDeleteTechnician(Number(b.dataset.delTech))));
+}
+function openTechnicianForm(editId){
+  const existing = editId ? state.cache.technicians.find(t=>t.id===editId) : null;
+  const v = existing || { name:'', region:'east', area:'', techFrequencyDays:30, oneOnOneFrequencyDays:30, active:true };
+  const regionOptions = Object.entries(REGIONS).map(([k,r])=>`<option value="${k}" ${v.region===k?'selected':''}>${r.label}</option>`).join('');
+
+  const body = `
+    <div class="field"><label>Name</label><input id="tName" value="${escapeHTML(v.name)}" placeholder="Full name"></div>
+    <div class="field"><label>Zone (Thames key)</label><select id="tRegion">${regionOptions}</select></div>
+    <div class="field"><label>Area notes</label><input id="tArea" value="${escapeHTML(v.area)}" placeholder="e.g. Essex sites, exterior only…"></div>
+    <div class="field-row">
+      <div class="field"><label>Tech visit every (days)</label><input type="number" id="tFreqVisit" value="${v.techFrequencyDays}" min="7"></div>
+      <div class="field"><label>1-1 every (days)</label><input type="number" id="tFreqOO" value="${v.oneOnOneFrequencyDays}" min="7"></div>
+    </div>
+    <div class="field"><label><input type="checkbox" id="tActive" ${v.active?'checked':''} style="width:auto;"> Active</label></div>
+  `;
+  const foot = `
+    ${existing ? `<button class="btn btn-danger" id="tDelete">Remove</button>` : `<span></span>`}
+    <div class="modal-foot-right"><button class="btn btn-outline" id="tCancel">Cancel</button><button class="btn" id="tSave">${existing?'Save':'Add'}</button></div>
+  `;
+  showModal(existing?'Edit technician':'Add technician', body, foot);
+  document.getElementById('tCancel').addEventListener('click', closeModal);
+  document.getElementById('tDelete')?.addEventListener('click', ()=>{ closeModal(); confirmDeleteTechnician(editId); });
+  document.getElementById('tSave').addEventListener('click', async ()=>{
+    const name = document.getElementById('tName').value.trim();
+    if(!name){ toast('Name is required'); return; }
+    const obj = {
+      name,
+      region: document.getElementById('tRegion').value,
+      area: document.getElementById('tArea').value.trim(),
+      techFrequencyDays: Number(document.getElementById('tFreqVisit').value)||30,
+      oneOnOneFrequencyDays: Number(document.getElementById('tFreqOO').value)||30,
+      active: document.getElementById('tActive').checked,
+      createdAt: existing?.createdAt || new Date().toISOString(),
+    };
+    if(existing) obj.id = existing.id;
+    await DB.put('technicians', obj);
+    closeModal(); toast(existing?'Technician updated':'Technician added'); render();
+  });
+}
+function confirmDeleteTechnician(id){
+  const t = state.cache.technicians.find(x=>x.id===id);
+  showModal('Remove technician', `<p>Remove <strong>${escapeHTML(t.name)}</strong>? Their logged visits and 1-1s stay in history but will no longer be tracked for due dates.</p>`,
+    `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="cCancel">Cancel</button><button class="btn btn-danger" id="cConfirm">Remove</button></div>`);
+  document.getElementById('cCancel').addEventListener('click', closeModal);
+  document.getElementById('cConfirm').addEventListener('click', async ()=>{ await DB.delete('technicians', id); closeModal(); toast('Technician removed'); render(); });
+}
+
+/* ================= CLIENT SITES ================= */
+function renderSites(){
+  const filter = state.siteFilter;
+  let list = state.cache.sites;
+  if(filter!=='all') list = list.filter(s=>s.type===filter);
+
+  const rows = list.map(s=>{
+    const qa = siteQAStatus(s);
+    const badge = qa ? (qa.state==='overdue'? `<span class="badge badge-overdue">${qa.label}</span>` : qa.state==='due' ? `<span class="badge badge-due">${qa.label}</span>` : qa.state==='scheduled' ? `<span class="badge badge-scheduled">${qa.label}</span>` : `<span class="badge badge-ok">${qa.label}</span>`) : `<span class="badge badge-neutral">No fixed schedule</span>`;
+    return `<tr>
+      <td><div class="row-name">${escapeHTML(s.name)}</div>${s.isGeneral?`<div class="row-sub">Placeholder for unassigned QA visits</div>`:s.address?`<div class="row-sub">${escapeHTML(s.address)}</div>`:''}</td>
+      <td>${regionBadge(s.region)}</td>
+      <td><span class="badge badge-neutral">${s.type==='qa'?'QA site':s.type==='tech'?'Tech site':'Other'}</span></td>
+      <td>${badge}</td>
+      <td>${s.active? '' : '<span class="badge badge-neutral">Inactive</span>'}</td>
+      <td><div class="row-actions">
+        <button class="icon-btn" data-edit-site="${s.id}">Edit</button>
+        <button class="icon-btn" data-del-site="${s.id}">Remove</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+
+  const filters = [['all','All'],['qa','QA sites'],['tech','Tech sites'],['other','Other']].map(([f,label])=>
+    `<button class="chip ${state.siteFilter===f?'active':''}" data-sf="${f}">${label}</button>`).join('');
+
+  return `
+  <div class="view-head">
+    <div><h1>Client sites</h1><div class="view-sub">${state.cache.sites.length} site${state.cache.sites.length===1?'':'s'} logged · add sites as they come on, set a QA cadence per site</div></div>
+    <div class="view-actions">
+      <button class="btn btn-outline" id="bulkImportSitesBtn">⇪ Bulk import</button>
+      <button class="btn" id="addSiteBtn">+ Add site</button>
+    </div>
+  </div>
+  <div class="toolbar"><div class="chip-filter">${filters}</div></div>
+  ${list.length ? `<div class="card table-wrap"><table>
+    <thead><tr><th>Site</th><th>Zone</th><th>Type</th><th>QA status</th><th></th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>` : `<div class="card empty"><h3>No client sites yet</h3><p>You mentioned the site list is still to come — add sites here as and when, each with its own QA cadence, or use Bulk import to bring in a whole list at once.</p></div>`}
+  `;
+}
+function mountSites(){
+  document.getElementById('addSiteBtn').addEventListener('click', ()=>openSiteForm());
+  document.getElementById('bulkImportSitesBtn').addEventListener('click', ()=>openBulkImportSites());
+  document.querySelectorAll('[data-sf]').forEach(b=>b.addEventListener('click', ()=>{ state.siteFilter=b.dataset.sf; render(); }));
+  document.querySelectorAll('[data-edit-site]').forEach(b=>b.addEventListener('click', ()=>openSiteForm(Number(b.dataset.editSite))));
+  document.querySelectorAll('[data-del-site]').forEach(b=>b.addEventListener('click', ()=>confirmDeleteSite(Number(b.dataset.delSite))));
+}
+
+/* ---------- bulk import ---------- */
+const REGION_ALIASES = {
+  east:'east', 'east/north':'east', north:'east', 'east london':'east', 'east - north bank':'east', 'north bank':'east',
+  west:'west', south:'west', 'west london':'west', 'west - south bank':'west', 'south bank':'west',
+  outside:'outside', 'outside london':'outside', 'out of london':'outside', 'outside-london':'outside',
+  floating:'floating', exterior:'floating', all:'floating', other:'floating', '':'floating',
+};
+function normalizeRegion(v){
+  const key = (v||'').toLowerCase().trim();
+  if(!key) return 'floating';
+  if(REGION_ALIASES[key]) return REGION_ALIASES[key];
+  return ['east','west','outside','floating'].includes(key) ? key : 'floating';
+}
+function normalizeSiteType(v){
+  const key = (v||'').toLowerCase().trim();
+  if(key.startsWith('tech')) return 'tech';
+  if(key.startsWith('other')) return 'other';
+  return 'qa';
+}
+function parseCsvLine(line){
+  const result = [];
+  let cur = '', inQuotes = false;
+  for(let i=0;i<line.length;i++){
+    const c = line[i];
+    if(inQuotes){
+      if(c === '"'){ if(line[i+1] === '"'){ cur+='"'; i++; } else inQuotes=false; }
+      else cur+=c;
+    } else {
+      if(c === '"') inQuotes = true;
+      else if(c === ','){ result.push(cur.trim()); cur=''; }
+      else cur+=c;
+    }
+  }
+  result.push(cur.trim());
+  return result;
+}
+function parseBulkSites(raw){
+  const existingNames = new Set(state.cache.sites.map(s=>s.name.toLowerCase().trim()));
+  const lines = raw.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  const rows = [];
+  const seenThisImport = new Set();
+  for(const line of lines){
+    const cells = parseCsvLine(line);
+    const first = (cells[0]||'').toLowerCase();
+    if(rows.length===0 && ['name','site','site name','client site'].includes(first)) continue; // skip a header row
+    const name = (cells[0]||'').trim();
+    if(!name) continue;
+    const region = normalizeRegion(cells[1]);
+    const type = normalizeSiteType(cells[2]);
+    const freqRaw = (cells[3]||'').trim().toLowerCase();
+    const qaFrequencyDays = ['none','no','-','n/a'].includes(freqRaw) ? null : (freqRaw==='' ? 30 : (Number(freqRaw)||30));
+    const address = (cells[4]||'').trim();
+    const notes = (cells[5]||'').trim();
+    const key = name.toLowerCase();
+    const dupExisting = existingNames.has(key);
+    const dupThisImport = seenThisImport.has(key);
+    seenThisImport.add(key);
+    rows.push({ name, region, type, qaFrequencyDays, address, notes, skip: dupExisting || dupThisImport, reason: dupExisting ? 'Already exists' : dupThisImport ? 'Duplicate in list' : null });
+  }
+  return rows;
+}
+function openBulkImportSites(prefill){
+  const body = `
+    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:12px;line-height:1.7;">
+      One site per line. A plain name works for a quick add — or use comma-separated columns for full detail:<br>
+      <code style="font-size:11.5px;background:var(--paper-dim);padding:1px 5px;border-radius:4px;">name, zone, type, QA cadence in days, address, notes</code><br>
+      Zone: east / west / outside / floating (defaults to Floating if blank or unrecognised) · Type: qa / tech / other (defaults to QA) ·
+      QA cadence defaults to 30 days if left blank — type "none" for no fixed schedule.
+    </p>
+    <div class="field">
+      <label>Upload CSV or text file <span style="font-weight:400;text-transform:none;color:var(--text-faint);">(optional)</span></label>
+      <input type="file" id="biFile" accept=".csv,.txt">
+    </div>
+    <div class="field">
+      <label>Or paste here</label>
+      <textarea id="biText" rows="8" placeholder="LEK Consulting, east, qa, 30, 10 Fenchurch Ave&#10;AFRY Management, east&#10;Prequin, west, qa, 60">${prefill?escapeHTML(prefill):''}</textarea>
+    </div>
+  `;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="biCancel">Cancel</button><button class="btn" id="biPreview">Preview import</button></div>`;
+  showModal('Bulk import client sites', body, foot, { wide:true });
+  document.getElementById('biCancel').addEventListener('click', closeModal);
+  document.getElementById('biFile').addEventListener('change', async (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    const text = await file.text();
+    document.getElementById('biText').value = text;
+  });
+  document.getElementById('biPreview').addEventListener('click', ()=>{
+    const raw = document.getElementById('biText').value;
+    if(!raw.trim()){ toast('Paste or upload something first'); return; }
+    renderBulkImportPreview(parseBulkSites(raw), raw);
+  });
+}
+function renderBulkImportPreview(rows, raw){
+  const importable = rows.filter(r=>!r.skip);
+  const skipped = rows.filter(r=>r.skip);
+  const tableRows = rows.map(r=>`
+    <tr style="${r.skip?'opacity:.45;':''}">
+      <td><div class="row-name">${escapeHTML(r.name)}</div></td>
+      <td>${REGIONS[r.region].label}</td>
+      <td>${r.type==='qa'?'QA site':r.type==='tech'?'Tech site':'Other'}</td>
+      <td>${r.qaFrequencyDays==null?'No fixed schedule':r.qaFrequencyDays+' days'}</td>
+      <td>${r.skip ? `<span class="badge badge-neutral">${r.reason}</span>` : `<span class="badge badge-ok">Will import</span>`}</td>
+    </tr>
+  `).join('');
+  const body = `
+    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">
+      ${importable.length} site${importable.length===1?'':'s'} ready to import${skipped.length?` · ${skipped.length} skipped (already exist or repeated in your list)`:''}.
+    </p>
+    <div class="table-wrap" style="max-height:340px;overflow-y:auto;border:1px solid var(--line-soft);border-radius:8px;">
+      <table>
+        <thead><tr><th>Name</th><th>Zone</th><th>Type</th><th>QA cadence</th><th></th></tr></thead>
+        <tbody>${tableRows || `<tr><td colspan="5" style="text-align:center;color:var(--text-faint);padding:24px;">Nothing parsed — check the formatting and try again.</td></tr>`}</tbody>
+      </table>
+    </div>
+  `;
+  const foot = `
+    <button class="btn btn-outline" id="biBack">Back</button>
+    <div class="modal-foot-right">
+      <button class="btn btn-outline" id="biCancel2">Cancel</button>
+      <button class="btn" id="biConfirm" ${importable.length?'':'disabled'}>Import ${importable.length} site${importable.length===1?'':'s'}</button>
+    </div>
+  `;
+  showModal('Preview import', body, foot, { wide:true });
+  document.getElementById('biCancel2').addEventListener('click', closeModal);
+  document.getElementById('biBack').addEventListener('click', ()=>openBulkImportSites(raw));
+  document.getElementById('biConfirm').addEventListener('click', async ()=>{
+    for(const r of importable){
+      await DB.add('sites', {
+        name: r.name, region: r.region, type: r.type, address: r.address,
+        technicianId: null, qaFrequencyDays: r.qaFrequencyDays, notes: r.notes,
+        active: true, createdAt: new Date().toISOString(),
+      });
+    }
+    closeModal();
+    toast(`Imported ${importable.length} site${importable.length===1?'':'s'}`);
+    render();
+  });
+}
+function openSiteForm(editId){
+  const existing = editId ? state.cache.sites.find(s=>s.id===editId) : null;
+  const v = existing || { name:'', region:'east', address:'', type:'qa', qaFrequencyDays:30, technicianId:'', notes:'', active:true };
+  const regionOptions = Object.entries(REGIONS).map(([k,r])=>`<option value="${k}" ${v.region===k?'selected':''}>${r.label}</option>`).join('');
+  const techOptions = state.cache.technicians.map(t=>`<option value="${t.id}" ${v.technicianId==t.id?'selected':''}>${escapeHTML(t.name)}</option>`).join('');
+
+  const body = `
+    <div class="field"><label>Site name</label><input id="sName" value="${escapeHTML(v.name)}" placeholder="e.g. LEK Consulting"></div>
+    <div class="field-row">
+      <div class="field"><label>Zone</label><select id="sRegion">${regionOptions}</select></div>
+      <div class="field"><label>Type</label><select id="sType">
+        <option value="qa" ${v.type==='qa'?'selected':''}>QA site</option>
+        <option value="tech" ${v.type==='tech'?'selected':''}>Tech site</option>
+        <option value="other" ${v.type==='other'?'selected':''}>Other</option>
+      </select></div>
+    </div>
+    <div class="field"><label>Address / area</label><input id="sAddress" value="${escapeHTML(v.address)}"></div>
+    <div class="field"><label>Usual technician (optional)</label><select id="sTech"><option value="">—</option>${techOptions}</select></div>
+    <div class="field">
+      <label><input type="checkbox" id="sHasFreq" ${v.qaFrequencyDays?'checked':''} style="width:auto;"> Track a QA cadence for this site</label>
+      <input type="number" id="sFreq" value="${v.qaFrequencyDays||30}" min="7" style="margin-top:8px;" ${v.qaFrequencyDays?'':'disabled'}>
+      <div class="freq-hint">Days between QA visits — used to flag when this site is due or overdue.</div>
+    </div>
+    <div class="field"><label>Notes</label><textarea id="sNotes">${escapeHTML(v.notes||'')}</textarea></div>
+    <div class="field"><label><input type="checkbox" id="sActive" ${v.active?'checked':''} style="width:auto;"> Active</label></div>
+  `;
+  const foot = `
+    ${existing ? `<button class="btn btn-danger" id="sDelete">Remove</button>` : `<span></span>`}
+    <div class="modal-foot-right"><button class="btn btn-outline" id="sCancel">Cancel</button><button class="btn" id="sSave">${existing?'Save':'Add'}</button></div>
+  `;
+  showModal(existing?'Edit client site':'Add client site', body, foot);
+  document.getElementById('sHasFreq').addEventListener('change', (e)=>{ document.getElementById('sFreq').disabled = !e.target.checked; });
+  document.getElementById('sCancel').addEventListener('click', closeModal);
+  document.getElementById('sDelete')?.addEventListener('click', ()=>{ closeModal(); confirmDeleteSite(editId); });
+  document.getElementById('sSave').addEventListener('click', async ()=>{
+    const name = document.getElementById('sName').value.trim();
+    if(!name){ toast('Site name is required'); return; }
+    const techId = document.getElementById('sTech').value;
+    const obj = {
+      name,
+      region: document.getElementById('sRegion').value,
+      type: document.getElementById('sType').value,
+      address: document.getElementById('sAddress').value.trim(),
+      technicianId: techId? Number(techId): null,
+      qaFrequencyDays: document.getElementById('sHasFreq').checked ? (Number(document.getElementById('sFreq').value)||30) : null,
+      notes: document.getElementById('sNotes').value.trim(),
+      active: document.getElementById('sActive').checked,
+      createdAt: existing?.createdAt || new Date().toISOString(),
+    };
+    if(existing) obj.id = existing.id;
+    await DB.put('sites', obj);
+    closeModal(); toast(existing?'Site updated':'Site added'); render();
+  });
+}
+function confirmDeleteSite(id){
+  const s = state.cache.sites.find(x=>x.id===id);
+  showModal('Remove site', `<p>Remove <strong>${escapeHTML(s.name)}</strong>? Logged QA visits stay in history.</p>`,
+    `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="cCancel">Cancel</button><button class="btn btn-danger" id="cConfirm">Remove</button></div>`);
+  document.getElementById('cCancel').addEventListener('click', closeModal);
+  document.getElementById('cConfirm').addEventListener('click', async ()=>{ await DB.delete('sites', id); closeModal(); toast('Site removed'); render(); });
+}
+
+/* ================= SEARCH ================= */
+const EVENT_TYPE_FILTERS = [['all','All types'],['techVisit','Tech visits'],['qaVisit','QA visits'],['oneOnOne','1-1s'],['wfh','WFH'],['leave','Leave'],['other','Other']];
+const TIME_FILTERS = [['all','All time'],['week','This week'],['month','This month'],['missed','Missed / unconfirmed'],['upcoming','Upcoming']];
+
+function renderSearch(){
+  const typeChips = EVENT_TYPE_FILTERS.map(([k,label])=>
+    `<button class="chip ${state.searchTypeFilter===k?'active':''}" data-search-type="${k}">${label}</button>`).join('');
+  const timeChips = TIME_FILTERS.map(([k,label])=>
+    `<button class="chip ${state.searchTimeFilter===k?'active':''}" data-search-time="${k}">${label}</button>`).join('');
+  return `
+  <div class="view-head"><div><h1>Search</h1><div class="view-sub">Find a technician, client site, or logged visit — or just filter by type and time</div></div></div>
+  <div class="search-hero"><input type="search" id="searchInput" placeholder="Try “Larisa”, “LEK Consulting”, “overdue”…" value="${escapeHTML(state.searchQuery)}"></div>
+  <div class="toolbar" style="margin-bottom:6px;"><div class="chip-filter">${typeChips}</div></div>
+  <div class="toolbar" style="margin-bottom:16px;"><div class="chip-filter">${timeChips}</div></div>
+  <div id="searchResults"></div>
+  `;
+}
+function mountSearch(){
+  const input = document.getElementById('searchInput');
+  input.addEventListener('input', ()=>{ state.searchQuery = input.value; renderSearchResults(); });
+  input.focus();
+  document.querySelectorAll('[data-search-type]').forEach(b=>b.addEventListener('click', ()=>{
+    state.searchTypeFilter = b.dataset.searchType; render();
+  }));
+  document.querySelectorAll('[data-search-time]').forEach(b=>b.addEventListener('click', ()=>{
+    state.searchTimeFilter = b.dataset.searchTime; render();
+  }));
+  renderSearchResults();
+}
+function renderSearchResults(){
+  const q = state.searchQuery.trim().toLowerCase();
+  const typeFilter = state.searchTypeFilter || 'all';
+  const timeFilter = state.searchTimeFilter || 'all';
+  const box = document.getElementById('searchResults');
+  const hasFilter = typeFilter!=='all' || timeFilter!=='all';
+  if(!q && !hasFilter){ box.innerHTML = `<div class="empty"><p>Start typing, or pick a filter above, to browse technicians, sites and logged visits.</p></div>`; return; }
+
+  const today = todayISO();
+  const wkStart = toISO(mondayOf(new Date()));
+  const wkEnd = toISO(addDays(mondayOf(new Date()),6));
+  const now = new Date();
+  const moStart = toISO(new Date(now.getFullYear(), now.getMonth(), 1));
+  const moEnd = toISO(new Date(now.getFullYear(), now.getMonth()+1, 0));
+
+  function inTimeframe(e){
+    if(timeFilter==='week') return e.date>=wkStart && e.date<=wkEnd;
+    if(timeFilter==='month') return e.date>=moStart && e.date<=moEnd;
+    if(timeFilter==='missed') return e.date<today && !e.completed;
+    if(timeFilter==='upcoming') return e.date>=today;
+    return true;
+  }
+
+  // the legacy "overdue" free-text keyword (technician/site recurring status) only applies
+  // when browsing with no chip filters active, to keep plain typing behaviour familiar
+  const wantsOverdueKeyword = q.includes('overdue') && !hasFilter;
+
+  let techMatches = [], siteMatches = [];
+  if(typeFilter==='all'){
+    techMatches = state.cache.technicians.filter(t=>{
+      if(wantsOverdueKeyword){ const tv=techVisitStatus(t), oo=oneOnOneStatus(t); return tv.state==='overdue'||oo.state==='overdue'; }
+      if(!q) return false;
+      return t.name.toLowerCase().includes(q) || (t.area||'').toLowerCase().includes(q);
+    });
+    siteMatches = state.cache.sites.filter(s=>{
+      if(wantsOverdueKeyword){ const qa = siteQAStatus(s); return qa && qa.state==='overdue'; }
+      if(!q) return false;
+      return s.name.toLowerCase().includes(q) || (s.address||'').toLowerCase().includes(q) || (s.notes||'').toLowerCase().includes(q);
+    });
+  }
+
+  const eventMatches = wantsOverdueKeyword ? [] : state.cache.events.filter(e=>{
+    if(typeFilter!=='all' && e.type!==typeFilter) return false;
+    if(!inTimeframe(e)) return false;
+    if(q){
+      const who = e.technicianId? techName(e.technicianId): '';
+      const where = e.siteId? siteName(e.siteId): '';
+      const matches = (e.title||'').toLowerCase().includes(q) || (e.notes||'').toLowerCase().includes(q) || who.toLowerCase().includes(q) || where.toLowerCase().includes(q);
+      if(!matches) return false;
+    }
+    return true;
+  }).sort((a,b)=> a.date.localeCompare(b.date)).slice(0,80);
+
+  function group(title, items){
+    if(!items.length) return '';
+    return `<div class="result-group"><div class="result-group-title">${title} (${items.length})</div><div class="card">${items.join('')}</div></div>`;
+  }
+
+  const techHTML = techMatches.map(t=>{
+    const tv=techVisitStatus(t), oo=oneOnOneStatus(t);
+    return `<div class="result-item" data-open-tech="${t.id}">
+      <div class="row-name">${escapeHTML(t.name)}</div>
+      <div class="row-sub">${REGIONS[t.region].label} · Tech visit: ${tv.label} · 1-1: ${oo.label}</div>
+    </div>`;
+  });
+  const siteHTML = siteMatches.map(s=>{
+    const qa = siteQAStatus(s);
+    return `<div class="result-item" data-open-site="${s.id}">
+      <div class="row-name">${escapeHTML(s.name)}</div>
+      <div class="row-sub">${REGIONS[s.region].label}${qa? ' · QA: '+qa.label : ''}</div>
+    </div>`;
+  });
+  const eventHTML = eventMatches.map(e=>{
+    const who = e.technicianId? techName(e.technicianId): null;
+    const where = e.siteId? siteName(e.siteId): null;
+    const isMissed = !e.completed && e.date < today;
+    const statusBadge = isMissed ? `<span class="badge badge-overdue">Missed</span>` : e.completed ? `<span class="badge badge-ok">Done</span>` : `<span class="badge badge-scheduled">Scheduled</span>`;
+    return `<div class="result-item" data-open-event="${e.id}" data-event-date="${e.date}" style="display:flex;align-items:center;gap:12px;">
+      <div style="flex:1;min-width:0;">
+        <div class="row-name">${EVENT_TYPES[e.type].label}${who? ' — '+escapeHTML(who):''}${where? ' — '+escapeHTML(where):''}</div>
+        <div class="row-sub">${humanDate(e.date)}${e.notes? ' · '+escapeHTML(e.notes).slice(0,80):''}</div>
+      </div>
+      ${statusBadge}
+    </div>`;
+  });
+
+  const html = group('Technicians', techHTML) + group('Client sites', siteHTML) + group(timeFilter==='missed'?'Outstanding visits':'Logged visits', eventHTML);
+  box.innerHTML = html || `<div class="empty"><h3>No matches</h3><p>Try a different name, site, filter, or type “overdue”.</p></div>`;
+
+  box.querySelectorAll('[data-open-tech]').forEach(el=>el.addEventListener('click', ()=>openTechnicianForm(Number(el.dataset.openTech))));
+  box.querySelectorAll('[data-open-site]').forEach(el=>el.addEventListener('click', ()=>openSiteForm(Number(el.dataset.openSite))));
+  box.querySelectorAll('[data-open-event]').forEach(el=>el.addEventListener('click', ()=>{
+    state.weekStart = mondayOf(fromISO(el.dataset.eventDate));
+    navigate('schedule');
+    setTimeout(()=>openEventForm(null, Number(el.dataset.openEvent)), 50);
+  }));
+}
+
+/* ================= SETTINGS ================= */
+function renderSettings(){
+  const s = state.cache.settings || { techVisitsPerWeekMin:3, qaVisitsPerWeekMin:4, oneOnOnesPerWeekMax:3, wfhWeekday:3 };
+  return `
+  <div class="view-head"><div><h1>Settings</h1><div class="view-sub">KPI targets and defaults</div></div></div>
+  <div class="card card-pad" style="max-width:480px;">
+    <div class="field-row">
+      <div class="field"><label>Min tech visits / week</label><input type="number" id="setTV" value="${s.techVisitsPerWeekMin}" min="1"></div>
+      <div class="field"><label>Min QA visits / week</label><input type="number" id="setQA" value="${s.qaVisitsPerWeekMin}" min="1"></div>
+    </div>
+    <div class="field"><label>Max 1-1s / week (generator)</label><input type="number" id="setOO" value="${s.oneOnOnesPerWeekMax||3}" min="1"></div>
+    <div class="field"><label>Working-from-home day</label>
+      <select id="setWFH">
+        ${DOW_SHORT.map((d,i)=>`<option value="${i+1}" ${s.wfhWeekday===i+1?'selected':''}>${d}</option>`).join('')}
+      </select>
+    </div>
+    <button class="btn" id="setSave">Save settings</button>
+  </div>
+  <div class="card card-pad" style="max-width:480px;margin-top:16px;">
+    <h3 style="margin-bottom:8px;">Data</h3>
+    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:12px;">Everything is stored locally in this browser (IndexedDB) — nothing is sent to a server.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn btn-outline" id="exportBtn">Export backup (.json)</button>
+      <button class="btn btn-outline" id="clearEventsBtn">Clear schedule</button>
+      <button class="btn btn-danger" id="resetAllBtn">Reset all data</button>
+    </div>
+  </div>
+  `;
+}
+function mountSettings(){
+  document.getElementById('setSave').addEventListener('click', async ()=>{
+    await DB.put('settings', {
+      id:'settings',
+      techVisitsPerWeekMin: Number(document.getElementById('setTV').value)||3,
+      qaVisitsPerWeekMin: Number(document.getElementById('setQA').value)||4,
+      oneOnOnesPerWeekMax: Number(document.getElementById('setOO').value)||3,
+      wfhWeekday: Number(document.getElementById('setWFH').value)||3,
+    });
+    toast('Settings saved'); render();
+  });
+  document.getElementById('exportBtn').addEventListener('click', async ()=>{
+    const data = {
+      technicians: await DB.getAll('technicians'),
+      sites: await DB.getAll('sites'),
+      events: await DB.getAll('events'),
+      settings: await DB.get('settings','settings'),
+      exportedAt: new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `routeboard-backup-${todayISO()}.json`;
+    a.click();
+  });
+  document.getElementById('clearEventsBtn').addEventListener('click', confirmClearEvents);
+  document.getElementById('resetAllBtn').addEventListener('click', confirmResetAll);
+}
+
+function confirmClearEvents(){
+  showModal('Clear schedule', `
+    <p>Delete every logged and scheduled visit — tech visits, QA visits, 1-1s, WFH and leave entries.
+    Technicians, client sites and settings are all kept exactly as they are.</p>
+  `, `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="cCancel">Cancel</button><button class="btn btn-danger" id="cConfirm">Clear schedule</button></div>`);
+  document.getElementById('cCancel').addEventListener('click', closeModal);
+  document.getElementById('cConfirm').addEventListener('click', async ()=>{
+    await DB.clear('events');
+    closeModal(); toast('Schedule cleared');
+    state.weekStart = mondayOf(new Date());
+    navigate('dashboard');
+  });
+}
+
+function confirmResetAll(){
+  showModal('Reset all data', `
+    <p>This deletes <strong>everything</strong> — all technicians, client sites, and logged/scheduled
+    visits — and restores the app to its starting state (the original 11 technicians, the
+    "General / TBC" placeholder site, and default KPI targets).</p>
+    <p style="margin-top:10px;font-size:12.5px;color:var(--clay);font-weight:600;">This can't be undone. Export a backup first if you want to keep a copy.</p>
+  `, `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="cCancel">Cancel</button><button class="btn btn-danger" id="cConfirm">Reset everything</button></div>`);
+  document.getElementById('cCancel').addEventListener('click', closeModal);
+  document.getElementById('cConfirm').addEventListener('click', async ()=>{
+    await DB.clear('technicians');
+    await DB.clear('sites');
+    await DB.clear('events');
+    await DB.clear('settings');
+    await seedIfEmpty();
+    closeModal(); toast('All data reset');
+    state.weekStart = mondayOf(new Date());
+    navigate('dashboard');
+  });
+}
+
+/* ================= boot ================= */
+function initNav(){
+  document.querySelectorAll('.nav-item[data-route]').forEach(b=>b.addEventListener('click', ()=>navigate(b.dataset.route)));
+  document.getElementById('hamburger').addEventListener('click', ()=>document.getElementById('app').classList.toggle('nav-open'));
+  document.getElementById('topbarAdd').addEventListener('click', ()=>openEventForm({ date: todayISO() }));
+  document.getElementById('logoutBtn').addEventListener('click', ()=>Auth.signOut());
+  window.addEventListener('hashchange', ()=>{
+    const r = location.hash.replace('#','') || 'dashboard';
+    if(ROUTE_TITLES[r] && r !== state.route) navigate(r);
+  });
+}
+
+let deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', (e)=>{
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  const hint = document.getElementById('installHint');
+  if(hint) hint.hidden = false;
+});
+document.addEventListener('click', (e)=>{
+  if(e.target?.id==='installBtn' && deferredInstallPrompt){
+    deferredInstallPrompt.prompt();
+    deferredInstallPrompt = null;
+  }
+});
+
+/* ---------------- auth screen ---------------- */
+let authMode = 'signin';
+let appStarted = false;
+
+function showAuthScreen(){
+  document.getElementById('authScreen').hidden = false;
+  document.getElementById('app').hidden = true;
+}
+function showAppShell(){
+  document.getElementById('authScreen').hidden = true;
+  document.getElementById('app').hidden = false;
+}
+
+function initAuthForm(){
+  const toggle = document.getElementById('authToggle');
+  const submit = document.getElementById('authSubmit');
+  const title = document.getElementById('authTitle');
+  const errBox = document.getElementById('authError');
+  const emailInput = document.getElementById('authEmail');
+  const passInput = document.getElementById('authPassword');
+
+  function setMode(mode){
+    authMode = mode;
+    title.textContent = mode==='signin' ? 'Sign in' : 'Create account';
+    submit.textContent = mode==='signin' ? 'Sign in' : 'Sign up';
+    toggle.textContent = mode==='signin' ? "Need an account? Sign up" : 'Already have an account? Sign in';
+    errBox.hidden = true;
+  }
+
+  toggle.addEventListener('click', ()=> setMode(authMode==='signin' ? 'signup' : 'signin'));
+
+  async function submitForm(){
+    const email = emailInput.value.trim();
+    const password = passInput.value;
+    errBox.hidden = true;
+    if(!email || !password){
+      errBox.textContent = 'Enter an email and password.';
+      errBox.style.color = 'var(--clay)';
+      errBox.hidden = false;
+      return;
+    }
+    submit.disabled = true;
+    const original = submit.textContent;
+    submit.textContent = 'Please wait…';
+    try{
+      const { error } = authMode==='signin' ? await Auth.signIn(email, password) : await Auth.signUp(email, password);
+      if(error){
+        errBox.textContent = error.message;
+        errBox.style.color = 'var(--clay)';
+        errBox.hidden = false;
+      } else if(authMode==='signup'){
+        errBox.textContent = 'Account created — check your email to confirm it, then sign in below.';
+        errBox.style.color = 'var(--forest-dim)';
+        errBox.hidden = false;
+        setMode('signin');
+      }
+      // successful sign-in is picked up by the onAuthStateChange listener in boot()
+    } catch(e){
+      errBox.textContent = e?.message || 'Something went wrong — check your connection and try again.';
+      errBox.style.color = 'var(--clay)';
+      errBox.hidden = false;
+    }
+    submit.disabled = false;
+    submit.textContent = original;
+  }
+
+  submit.addEventListener('click', submitForm);
+  [emailInput, passInput].forEach(el=>el.addEventListener('keydown', (e)=>{ if(e.key==='Enter') submitForm(); }));
+}
+
+/* ---------------- boot ---------------- */
+async function startApp(){
+  if(appStarted) return; // guard against onAuthStateChange firing more than once
+  appStarted = true;
+  await seedIfEmpty();
+  initNav();
+  const startRoute = (location.hash.replace('#','')) || 'dashboard';
+  navigate(ROUTE_TITLES[startRoute] ? startRoute : 'dashboard');
+
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register('sw.js').catch(()=>{ /* offline caching optional */ });
+  }
+}
+
+async function boot(){
+  initAuthForm();
+  const session = await Auth.getSession();
+  if(session){
+    showAppShell();
+    await startApp();
+  } else {
+    showAuthScreen();
+  }
+  Auth.onChange(async (session)=>{
+    if(session){
+      showAppShell();
+      await startApp();
+    } else {
+      appStarted = false;
+      showAuthScreen();
+    }
+  });
+}
+boot();

@@ -1,0 +1,16 @@
+{
+  "name": "Route Board — Field Schedule",
+  "short_name": "Route Board",
+  "description": "Technician visits, QA visits and 1-1 scheduler with overdue tracking.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#FAF8F2",
+  "theme_color": "#16241c",
+  "orientation": "any",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

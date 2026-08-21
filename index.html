@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Route Board · Field Schedule</title>
+<meta name="theme-color" content="#16241c">
+<meta name="description" content="Technician visits, QA visits and 1-1 scheduler">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,500&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ===== Auth screen ===== -->
+<div class="auth-screen" id="authScreen" hidden>
+  <div class="auth-card">
+    <div class="auth-brand">
+      <svg class="brand-mark" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M20 36C20 36 8 29.5 8 18.5C8 11 13.5 6 20 6C26.5 6 32 11 32 18.5C32 29.5 20 36 20 36Z" stroke="currentColor" stroke-width="2"/>
+        <path d="M20 36V14" stroke="currentColor" stroke-width="2"/>
+        <path d="M20 22C20 22 14 20.5 14 15.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M20 28C20 28 26.5 26.5 26.5 20.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <div>
+        <div class="brand-title" style="color:var(--ink);">Route Board</div>
+        <div class="brand-sub" style="color:var(--text-dim);">Field schedule</div>
+      </div>
+    </div>
+    <h2 id="authTitle">Sign in</h2>
+    <div class="field"><label>Email</label><input type="email" id="authEmail" autocomplete="username"></div>
+    <div class="field"><label>Password</label><input type="password" id="authPassword" autocomplete="current-password"></div>
+    <div class="auth-error" id="authError" hidden></div>
+    <button class="btn" id="authSubmit" style="width:100%;justify-content:center;">Sign in</button>
+    <button class="btn-link" id="authToggle">Need an account? Sign up</button>
+  </div>
+</div>
+
+<div class="app" id="app" hidden>
+
+  <!-- ===== Sidebar ===== -->
+  <nav class="sidebar" id="sidebar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M20 36C20 36 8 29.5 8 18.5C8 11 13.5 6 20 6C26.5 6 32 11 32 18.5C32 29.5 20 36 20 36Z" stroke="currentColor" stroke-width="2"/>
+        <path d="M20 36V14" stroke="currentColor" stroke-width="2"/>
+        <path d="M20 22C20 22 14 20.5 14 15.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M20 28C20 28 26.5 26.5 26.5 20.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <div class="brand-text">
+        <span class="brand-title">Route Board</span>
+        <span class="brand-sub">Field schedule</span>
+      </div>
+    </div>
+
+    <div class="nav-group">
+      <button class="nav-item" data-route="dashboard"><span class="nav-ico">◧</span>Dashboard</button>
+      <button class="nav-item" data-route="schedule"><span class="nav-ico">▦</span>Weekly board</button>
+      <button class="nav-item" data-route="technicians"><span class="nav-ico">◔</span>Technicians</button>
+      <button class="nav-item" data-route="sites"><span class="nav-ico">◈</span>Client sites</button>
+      <button class="nav-item" data-route="search"><span class="nav-ico">⌕</span>Search</button>
+      <button class="nav-item" data-route="settings"><span class="nav-ico">⚙</span>Settings</button>
+    </div>
+
+    <div class="sidebar-foot">
+      <div class="river-key">
+        <div class="river-key-title">Thames key</div>
+        <div class="river-key-row"><span class="dot dot-east"></span>East · North bank</div>
+        <div class="river-key-row"><span class="dot dot-west"></span>West · South bank</div>
+        <div class="river-key-row"><span class="dot dot-floating"></span>Floating / exterior</div>
+        <div class="river-key-row"><span class="dot dot-outside"></span>Outside London</div>
+      </div>
+      <div class="install-hint" id="installHint" hidden>
+        <button id="installBtn" class="btn btn-ghost btn-small">Install app</button>
+      </div>
+      <button class="nav-item" id="logoutBtn"><span class="nav-ico">⏻</span>Log out</button>
+    </div>
+  </nav>
+
+  <!-- ===== Mobile top bar ===== -->
+  <header class="topbar">
+    <button class="hamburger" id="hamburger" aria-label="Open menu">☰</button>
+    <span class="topbar-title" id="topbarTitle">Dashboard</span>
+    <button class="topbar-add" id="topbarAdd" aria-label="Add event">+</button>
+  </header>
+
+  <!-- ===== Main content ===== -->
+  <main class="main" id="main">
+    <!-- views injected here by app.js -->
+  </main>
+</div>
+
+<!-- ===== Modal root ===== -->
+<div class="modal-backdrop" id="modalBackdrop" hidden>
+  <div class="modal" id="modal" role="dialog" aria-modal="true"></div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="db.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
