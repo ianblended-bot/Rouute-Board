@@ -397,6 +397,7 @@ function renderSchedule(){
         <button class="btn btn-outline" id="wkNext">Next ›</button>
       </div>
       <button class="btn btn-outline" id="genScheduleBtn">✦ Generate schedule</button>
+      <button class="btn btn-outline" id="exportBtn">⬇ Export</button>
       <button class="btn" id="addEventBtn">+ Add event</button>
     </div>
   </div>
@@ -431,12 +432,17 @@ function mountSchedule(){
   document.getElementById('wkToday').addEventListener('click', ()=>{ state.weekStart = mondayOf(new Date()); render(); });
   document.getElementById('addEventBtn').addEventListener('click', ()=>openEventForm({ date: toISO(state.weekStart) }));
   document.getElementById('genScheduleBtn').addEventListener('click', ()=>openGenerateModal());
+  document.getElementById('exportBtn').addEventListener('click', ()=>openExportModal());
   document.querySelectorAll('[data-add-day]').forEach(b=>b.addEventListener('click', ()=>openEventForm({ date:b.dataset.addDay })));
   document.querySelectorAll('[data-open-event]').forEach(b=>b.addEventListener('click', ()=>openEventForm(null, Number(b.dataset.openEvent))));
   document.querySelectorAll('[data-toggle-complete]').forEach(b=>b.addEventListener('click', (e)=>{
     e.stopPropagation();
     toggleEventComplete(Number(b.dataset.toggleComplete));
   }));
+  // on the mobile swipeable board, bring today's card into view automatically
+  if(window.innerWidth <= 880){
+    document.querySelector('.day-sheet.is-today')?.scrollIntoView({ inline:'center', block:'nearest' });
+  }
 }
 
 /* ---------- event form ---------- */
@@ -815,6 +821,164 @@ async function generateSchedule({ startISO, weeks, overwrite }){
   };
 }
 
+/* ================= EXPORT ================= */
+const EXPORT_LIBS = {
+  xlsx: 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
+  jspdf: 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
+  jspdfAutotable: 'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js',
+};
+const _loadedScripts = {};
+function loadScriptOnce(src){
+  return new Promise((resolve, reject)=>{
+    if(_loadedScripts[src]){ resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = ()=>{ _loadedScripts[src] = true; resolve(); };
+    s.onerror = ()=>reject(new Error('Could not load ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+function buildExportRows(startISO, endISO){
+  return state.cache.events
+    .filter(e => e.date >= startISO && e.date <= endISO)
+    .sort((a,b)=> a.date.localeCompare(b.date) || (a.time||'').localeCompare(b.time||''))
+    .map(e=>{
+      const t = EVENT_TYPES[e.type] || EVENT_TYPES.other;
+      const who = e.technicianId ? techName(e.technicianId) : '';
+      const where = e.siteId ? siteName(e.siteId) : '';
+      const status = e.completed ? 'Done' : (e.date < todayISO() ? 'Missed' : 'Scheduled');
+      return {
+        Date: e.date,
+        Day: DOW_SHORT[(fromISO(e.date).getDay()+6)%7],
+        Type: t.label,
+        Technician: who,
+        Site: where,
+        Time: e.time || '',
+        Status: status,
+        Notes: e.notes || '',
+      };
+    });
+}
+
+function downloadBlob(blob, filename){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+}
+
+function exportCSV(rows, filename){
+  const headers = Object.keys(rows[0]);
+  const escape = (v)=>{
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+  };
+  const lines = [headers.join(','), ...rows.map(r => headers.map(h=>escape(r[h])).join(','))];
+  downloadBlob(new Blob([lines.join('\r\n')], { type:'text/csv;charset=utf-8;' }), filename + '.csv');
+  toast('CSV exported');
+}
+
+async function exportXLSX(rows, filename){
+  try{ await loadScriptOnce(EXPORT_LIBS.xlsx); }
+  catch(e){ toast('Could not load the Excel export library — check your connection'); return; }
+  const ws = XLSX.utils.json_to_sheet(rows);
+  ws['!cols'] = [{wch:11},{wch:5},{wch:12},{wch:20},{wch:20},{wch:7},{wch:10},{wch:44}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Schedule');
+  XLSX.writeFile(wb, filename + '.xlsx');
+  toast('Excel file exported');
+}
+
+async function exportPDF(rows, filename, startISO, endISO){
+  try{
+    await loadScriptOnce(EXPORT_LIBS.jspdf);
+    await loadScriptOnce(EXPORT_LIBS.jspdfAutotable);
+  } catch(e){ toast('Could not load the PDF export library — check your connection'); return; }
+  const doc = new jspdf.jsPDF({ orientation:'landscape' });
+  doc.setFontSize(14);
+  doc.text('Route Board — Schedule Export', 14, 15);
+  doc.setFontSize(10);
+  doc.setTextColor(110,110,100);
+  doc.text(`${humanDate(startISO)} to ${humanDate(endISO)}`, 14, 21);
+  doc.autoTable({
+    startY: 26,
+    head: [['Date','Day','Type','Technician','Site','Time','Status','Notes']],
+    body: rows.map(r => [r.Date, r.Day, r.Type, r.Technician, r.Site, r.Time, r.Status, r.Notes]),
+    styles: { fontSize: 8, cellPadding: 3 },
+    headStyles: { fillColor: [31,75,63] },
+    alternateRowStyles: { fillColor: [246,244,237] },
+  });
+  doc.save(filename + '.pdf');
+  toast('PDF exported');
+}
+
+function openExportModal(){
+  const wkStartISO = toISO(mondayOf(state.weekStart));
+  const wkEndISO = toISO(addDays(fromISO(wkStartISO), 6));
+  const now = new Date();
+  const moStartISO = toISO(new Date(now.getFullYear(), now.getMonth(), 1));
+  const moEndISO = toISO(new Date(now.getFullYear(), now.getMonth()+1, 0));
+
+  const body = `
+    <div class="field"><label>Range</label>
+      <select id="exRange">
+        <option value="week">This week (${humanDateShort(wkStartISO)} – ${humanDateShort(wkEndISO)})</option>
+        <option value="month">This month (${humanDateShort(moStartISO)} – ${humanDateShort(moEndISO)})</option>
+        <option value="custom">Custom range</option>
+      </select>
+    </div>
+    <div class="field-row" id="exCustomRange" style="display:none;">
+      <div class="field"><label>Start</label><input type="date" id="exStart" value="${wkStartISO}"></div>
+      <div class="field"><label>End</label><input type="date" id="exEnd" value="${wkEndISO}"></div>
+    </div>
+    <div class="field"><label>Format</label>
+      <select id="exFormat">
+        <option value="csv">CSV (.csv)</option>
+        <option value="xlsx">Excel (.xlsx)</option>
+        <option value="pdf">PDF (.pdf)</option>
+      </select>
+    </div>
+  `;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="exCancel">Cancel</button><button class="btn" id="exRun">Export</button></div>`;
+  showModal('Export schedule', body, foot);
+
+  document.getElementById('exCancel').addEventListener('click', closeModal);
+  document.getElementById('exRange').addEventListener('change', (e)=>{
+    document.getElementById('exCustomRange').style.display = e.target.value==='custom' ? 'flex' : 'none';
+  });
+  document.getElementById('exRun').addEventListener('click', async ()=>{
+    const range = document.getElementById('exRange').value;
+    const format = document.getElementById('exFormat').value;
+    let startISO, endISO;
+    if(range==='week'){ startISO = wkStartISO; endISO = wkEndISO; }
+    else if(range==='month'){ startISO = moStartISO; endISO = moEndISO; }
+    else { startISO = document.getElementById('exStart').value; endISO = document.getElementById('exEnd').value; }
+    if(!startISO || !endISO || startISO > endISO){ toast('Pick a valid date range'); return; }
+
+    const rows = buildExportRows(startISO, endISO);
+    if(rows.length === 0){ toast('No visits logged in that range'); return; }
+
+    const runBtn = document.getElementById('exRun');
+    runBtn.disabled = true;
+    const original = runBtn.textContent;
+    runBtn.textContent = 'Exporting…';
+    const filename = `route-board_${startISO}_to_${endISO}`;
+    try{
+      if(format==='csv') exportCSV(rows, filename);
+      else if(format==='xlsx') await exportXLSX(rows, filename);
+      else await exportPDF(rows, filename, startISO, endISO);
+      closeModal();
+    } finally {
+      runBtn.disabled = false;
+      runBtn.textContent = original;
+    }
+  });
+}
+
 /* ================= TECHNICIANS ================= */
 function renderTechnicians(){
   const filter = state.techFilter;
@@ -827,10 +991,10 @@ function renderTechnicians(){
     const badge = st => st.state==='overdue' ? `<span class="badge badge-overdue">${st.label}</span>` : st.state==='due' ? `<span class="badge badge-due">${st.label}</span>` : st.state==='scheduled' ? `<span class="badge badge-scheduled">${st.label}</span>` : `<span class="badge badge-ok">${st.label}</span>`;
     return `<tr data-tech-row="${t.id}">
       <td><div class="row-name">${escapeHTML(t.name)}</div>${t.area?`<div class="row-sub">${escapeHTML(t.area)}</div>`:''}</td>
-      <td>${regionBadge(t.region)}</td>
-      <td>${badge(tv)}</td>
-      <td>${badge(oo)}</td>
-      <td>${t.active? '' : '<span class="badge badge-neutral">Inactive</span>'}</td>
+      <td data-label="Zone">${regionBadge(t.region)}</td>
+      <td data-label="Tech visit">${badge(tv)}</td>
+      <td data-label="1-1">${badge(oo)}</td>
+      <td ${t.active?'':'data-label="Status"'}>${t.active? '' : '<span class="badge badge-neutral">Inactive</span>'}</td>
       <td><div class="row-actions">
         <button class="icon-btn" data-edit-tech="${t.id}">Edit</button>
         <button class="icon-btn" data-del-tech="${t.id}">Remove</button>
@@ -849,7 +1013,7 @@ function renderTechnicians(){
     <div class="view-actions"><button class="btn" id="addTechBtn">+ Add technician</button></div>
   </div>
   <div class="toolbar"><div class="chip-filter">${filters}</div></div>
-  ${list.length ? `<div class="card table-wrap"><table>
+  ${list.length ? `<div class="card table-wrap"><table class="responsive-table">
     <thead><tr><th>Name</th><th>Zone</th><th>Tech visit</th><th>1-1</th><th></th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table></div>` : `<div class="card empty"><h3>No technicians in this zone</h3><p>Add one, or clear the filter above.</p></div>`}
@@ -919,10 +1083,10 @@ function renderSites(){
     const badge = qa ? (qa.state==='overdue'? `<span class="badge badge-overdue">${qa.label}</span>` : qa.state==='due' ? `<span class="badge badge-due">${qa.label}</span>` : qa.state==='scheduled' ? `<span class="badge badge-scheduled">${qa.label}</span>` : `<span class="badge badge-ok">${qa.label}</span>`) : `<span class="badge badge-neutral">No fixed schedule</span>`;
     return `<tr>
       <td><div class="row-name">${escapeHTML(s.name)}</div>${s.isGeneral?`<div class="row-sub">Placeholder for unassigned QA visits</div>`:s.address?`<div class="row-sub">${escapeHTML(s.address)}</div>`:''}</td>
-      <td>${regionBadge(s.region)}</td>
-      <td><span class="badge badge-neutral">${s.type==='qa'?'QA site':s.type==='tech'?'Tech site':'Other'}</span></td>
-      <td>${badge}</td>
-      <td>${s.active? '' : '<span class="badge badge-neutral">Inactive</span>'}</td>
+      <td data-label="Zone">${regionBadge(s.region)}</td>
+      <td data-label="Type"><span class="badge badge-neutral">${s.type==='qa'?'QA site':s.type==='tech'?'Tech site':'Other'}</span></td>
+      <td data-label="QA status">${badge}</td>
+      <td ${s.active?'':'data-label="Status"'}>${s.active? '' : '<span class="badge badge-neutral">Inactive</span>'}</td>
       <td><div class="row-actions">
         <button class="icon-btn" data-edit-site="${s.id}">Edit</button>
         <button class="icon-btn" data-del-site="${s.id}">Remove</button>
@@ -942,7 +1106,7 @@ function renderSites(){
     </div>
   </div>
   <div class="toolbar"><div class="chip-filter">${filters}</div></div>
-  ${list.length ? `<div class="card table-wrap"><table>
+  ${list.length ? `<div class="card table-wrap"><table class="responsive-table">
     <thead><tr><th>Site</th><th>Zone</th><th>Type</th><th>QA status</th><th></th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table></div>` : `<div class="card empty"><h3>No client sites yet</h3><p>You mentioned the site list is still to come — add sites here as and when, each with its own QA cadence, or use Bulk import to bring in a whole list at once.</p></div>`}

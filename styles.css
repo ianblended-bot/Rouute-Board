@@ -324,6 +324,43 @@ tbody tr:hover{ background:var(--paper-dim); }
     display:flex; position:fixed; inset:0 auto 0 0; z-index:50; height:100vh; width:82vw; max-width:300px; box-shadow:var(--shadow-2);
   }
   .app.nav-open::after{ content:""; position:fixed; inset:0; background:rgba(0,0,0,.35); z-index:40; }
+
+  /* weekly board becomes a swipeable one-day-at-a-time carousel */
+  .board{
+    grid-auto-flow:column; grid-template-columns:none; grid-auto-columns:86%;
+    overflow-x:auto; scroll-snap-type:x mandatory; padding-bottom:6px;
+  }
+  .day-sheet{ scroll-snap-align:center; min-height:0; }
+
+  /* technician / site tables collapse into stacked cards */
+  .responsive-table thead{ display:none; }
+  .responsive-table, .responsive-table tbody{ display:block; width:100%; }
+  .responsive-table tr{
+    display:block; background:var(--card); border:1px solid var(--line-soft); border-radius:10px;
+    padding:12px 14px; margin-bottom:10px;
+  }
+  .responsive-table td{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    border:none; padding:5px 0; text-align:right;
+  }
+  .responsive-table td[data-label]::before{
+    content:attr(data-label); font-size:10.5px; text-transform:uppercase; letter-spacing:.05em;
+    font-weight:700; color:var(--text-dim); text-align:left; flex:0 0 auto;
+  }
+  .responsive-table td:first-child{ padding-top:0; text-align:left; }
+  .responsive-table td:empty{ display:none; }
+  .responsive-table .row-actions{ justify-content:flex-end; padding-top:8px; margin-top:4px; border-top:1px solid var(--line-soft); }
+
+  /* forms stack to one column, and modal buttons get more room to tap */
+  .field-row{ flex-direction:column; gap:0; }
+  .modal-foot{ flex-wrap:wrap-reverse; }
+  .modal-foot-right{ width:100%; }
+  .modal-foot-right .btn{ flex:1; justify-content:center; }
+  .modal-foot > span:empty{ display:none; }
+
+  /* bigger touch targets */
+  .et-check{ width:20px; height:20px; }
+  .icon-btn{ padding:8px 11px; }
 }
 
 .skip-link{ position:absolute; left:-999px; }
