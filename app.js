@@ -542,7 +542,7 @@ async function materializeRecurringBlocks(startISO, endISO){
       if(tmpl.weekday !== isoDow) continue;
       const key = `${iso}|${tmpl.label}`;
       if(existingKeys.has(key)) continue;
-      await DB.add('events', { date:iso, type:'block', technicianId:null, siteId:null, time:tmpl.time||'', title:tmpl.label, notes:'', completed:true, createdAt:new Date().toISOString() });
+      await DB.add('events', { date:iso, type:'block', technicianId:null, siteId:null, time:tmpl.time||'', title:tmpl.label, notes:'', completed: iso<=todayISO(), createdAt:new Date().toISOString() });
       existingKeys.add(key);
       created = true;
     }
@@ -589,7 +589,7 @@ function openAbsenceForm(technicianId){
     let d = start, guard = 0;
     while(d <= end && guard < 400){
       guard++;
-      await DB.add('events', { date:d, type:'techAbsence', technicianId, siteId:null, time:'', title:label, notes:'', completed:true, createdAt:new Date().toISOString() });
+      await DB.add('events', { date:d, type:'techAbsence', technicianId, siteId:null, time:'', title:label, notes:'', completed: d<=todayISO(), createdAt:new Date().toISOString() });
       d = isoAddDays(d,1);
     }
     toast('Absence added');
