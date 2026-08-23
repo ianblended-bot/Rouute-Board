@@ -252,7 +252,11 @@ function renderDashboard(){
   const missedEvents = state.cache.events
     .filter(e=> e.date < todayISO() && !e.completed && ['techVisit','qaVisit','oneOnOne'].includes(e.type))
     .sort((a,b)=> a.date.localeCompare(b.date));
-  const outstandingRows = missedEvents.length ? missedEvents.slice(0,8).map(e=>{
+  const unreviewedHuddles = state.cache.events
+    .filter(e=> e.type==='block' && e.date<=todayISO() && !state.cache.huddleAttendance.some(a=>a.eventId===e.id))
+    .sort((a,b)=> a.date.localeCompare(b.date));
+  const outstandingCount = missedEvents.length + unreviewedHuddles.length;
+  const outstandingRows = missedEvents.slice(0,8).map(e=>{
     const t = EVENT_TYPES[e.type] || EVENT_TYPES.other;
     const who = e.technicianId ? techName(e.technicianId) : null;
     const where = e.siteId ? siteName(e.siteId) : null;
@@ -262,8 +266,14 @@ function renderDashboard(){
       <div class="watch-spacer"></div>
       <button class="icon-btn" data-toggle-complete="${e.id}">Mark done</button>
     </div>`;
-  }).join('') + (missedEvents.length>8 ? `<div style="padding:10px 12px;"><a href="#search" data-goto-missed="1" style="font-size:12px;color:var(--forest-dim);font-weight:600;">View all ${missedEvents.length} outstanding →</a></div>` : '')
-    : `<div class="empty" style="padding:22px;"><p>Nothing outstanding — everything logged is confirmed done.</p></div>`;
+  }).join('') + unreviewedHuddles.slice(0,8).map(e=>{
+    return `<div class="watch-row" data-open-event="${e.id}">
+      <div><div class="watch-name">${escapeHTML(e.title||'Huddle')}</div><div class="watch-meta">Attendance not recorded · was on ${humanDate(e.date)}</div></div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-mark-attendance="${e.id}">Mark attendance</button>
+    </div>`;
+  }).join('') + (outstandingCount>8 ? `<div style="padding:10px 12px;"><a href="#search" data-goto-missed="1" style="font-size:12px;color:var(--forest-dim);font-weight:600;">View all ${outstandingCount} outstanding →</a></div>` : '');
+  const outstandingHTML = outstandingCount ? outstandingRows : `<div class="empty" style="padding:22px;"><p>Nothing outstanding — everything logged is confirmed done.</p></div>`;
 
   return `
   <div class="view-head">
@@ -306,9 +316,9 @@ function renderDashboard(){
       <div class="kpi-note">${overdueTech.filter(x=>x.oo.state==='overdue').length} technician(s) overdue a 1-1 overall</div>
     </div>
     <div class="card kpi-card">
-      <div class="kpi-label">Outstanding visits</div>
-      <div class="kpi-value" style="color:${missedEvents.length?'var(--clay)':'var(--ink)'}">${missedEvents.length}</div>
-      <div class="kpi-note">Past visits not yet confirmed done</div>
+      <div class="kpi-label">Outstanding</div>
+      <div class="kpi-value" style="color:${outstandingCount?'var(--clay)':'var(--ink)'}">${outstandingCount}</div>
+      <div class="kpi-note">Visits not confirmed done · huddles not reviewed</div>
     </div>
     <div class="card kpi-card">
       <div class="kpi-label">Overdue items</div>
@@ -321,7 +331,7 @@ function renderDashboard(){
     <div>
       <div class="card" style="margin-bottom:16px;">
         <div class="panel-title"><h3>Outstanding — needs confirming</h3></div>
-        <div class="panel-body">${outstandingRows}</div>
+        <div class="panel-body">${outstandingHTML}</div>
       </div>
       <div class="card" style="margin-bottom:16px;">
         <div class="panel-title"><h3>Overdue — technicians</h3></div>
@@ -364,6 +374,10 @@ function mountDashboard(){
   document.querySelectorAll('[data-toggle-complete]').forEach(b=>b.addEventListener('click', (e)=>{
     e.stopPropagation();
     toggleEventComplete(Number(b.dataset.toggleComplete));
+  }));
+  document.querySelectorAll('[data-mark-attendance]').forEach(b=>b.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    openEventForm(null, Number(b.dataset.markAttendance));
   }));
   document.querySelector('[data-goto-missed]')?.addEventListener('click', (e)=>{
     e.preventDefault();
@@ -541,10 +555,14 @@ function openEventForm(defaults, editId){
     if(isEdit) obj.id = editId;
     await DB.put('events', obj);
     if(isEdit && type==='block'){
-      const checked = Array.from(document.querySelectorAll('.fAttend:checked')).map(el=>Number(el.value));
+      const allAttendInputs = Array.from(document.querySelectorAll('.fAttend'));
       const existingRows = state.cache.huddleAttendance.filter(a=>a.eventId===editId);
       for(const row of existingRows) await DB.delete('huddle_attendance', row.id);
-      for(const technicianId of checked) await DB.add('huddle_attendance', { eventId: editId, technicianId, attended: true });
+      // record every technician explicitly (attended true/false), not just the ones ticked —
+      // that way "reviewed, nobody attended" is distinguishable from "never reviewed at all"
+      for(const el of allAttendInputs){
+        await DB.add('huddle_attendance', { eventId: editId, technicianId: Number(el.value), attended: el.checked });
+      }
     }
     closeModal(); toast(isEdit? 'Event updated':'Event added'); render();
   });
