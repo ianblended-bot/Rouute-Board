@@ -540,6 +540,8 @@ async function materializeRecurringBlocks(startISO, endISO){
     const dow = d.getDay(); const isoDow = dow===0?7:dow;
     for(const tmpl of templates){
       if(tmpl.weekday !== isoDow) continue;
+      if(tmpl.startDate && iso < tmpl.startDate) continue;
+      if(tmpl.endDate && iso > tmpl.endDate) continue;
       const key = `${iso}|${tmpl.label}`;
       if(existingKeys.has(key)) continue;
       await DB.add('events', { date:iso, type:'block', technicianId:null, siteId:null, time:tmpl.time||'', title:tmpl.label, notes:'', completed: iso<=todayISO(), createdAt:new Date().toISOString() });
@@ -1603,14 +1605,20 @@ function renderSearchResults(){
 function renderSettings(){
   const s = state.cache.settings || { techVisitsPerWeekMin:3, qaVisitsPerWeekMin:4, oneOnOnesPerWeekMax:3, wfhWeekday:3 };
   const blocks = state.cache.recurringBlocks || [];
-  const blockRows = blocks.length ? blocks.map(b=>`
+  const blockRows = blocks.length ? blocks.map(b=>{
+    const rangeBits = [];
+    if(b.startDate) rangeBits.push(`from ${humanDateShort(b.startDate)}`);
+    if(b.endDate) rangeBits.push(`until ${humanDateShort(b.endDate)}`);
+    const rangeText = rangeBits.length ? ' · '+rangeBits.join(' ') : '';
+    return `
     <div class="watch-row">
-      <div><div class="watch-name">${escapeHTML(b.label)}</div><div class="watch-meta">Every ${DOW_SHORT[b.weekday-1]}${b.time?' · '+b.time:''}${b.active?'':' · Inactive'}</div></div>
+      <div><div class="watch-name">${escapeHTML(b.label)}</div><div class="watch-meta">Every ${DOW_SHORT[b.weekday-1]}${b.time?' · '+b.time:''}${rangeText}${b.active?'':' · Inactive'}</div></div>
       <div class="watch-spacer"></div>
+      <button class="icon-btn" data-clear-block="${b.id}">Clear instances</button>
       <button class="icon-btn" data-edit-block="${b.id}">Edit</button>
       <button class="icon-btn" data-del-block="${b.id}">Remove</button>
-    </div>
-  `).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No recurring blocks yet.</p>`;
+    </div>`;
+  }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No recurring blocks yet.</p>`;
   return `
   <div class="view-head"><div><h1>Settings</h1><div class="view-sub">KPI targets and defaults</div></div></div>
   <div class="card card-pad" style="max-width:480px;">
@@ -1645,13 +1653,18 @@ function renderSettings(){
 }
 function openBlockForm(editId){
   const existing = editId ? (state.cache.recurringBlocks||[]).find(b=>b.id===editId) : null;
-  const v = existing || { label:'', weekday:1, time:'', active:true };
+  const v = existing || { label:'', weekday:1, time:'', active:true, startDate:'', endDate:'' };
   const body = `
     <div class="field"><label>Label</label><input id="bLabel" value="${escapeHTML(v.label)}" placeholder="e.g. Team huddle"></div>
     <div class="field-row">
       <div class="field"><label>Every</label><select id="bWeekday">${DOW_SHORT.map((d,i)=>`<option value="${i+1}" ${v.weekday===i+1?'selected':''}>${d}</option>`).join('')}</select></div>
       <div class="field"><label>Time (optional)</label><input type="time" id="bTime" value="${v.time||''}"></div>
     </div>
+    <div class="field-row">
+      <div class="field"><label>Starts (optional)</label><input type="date" id="bStart" value="${v.startDate||''}"></div>
+      <div class="field"><label>Ends (optional)</label><input type="date" id="bEnd" value="${v.endDate||''}"></div>
+    </div>
+    <div class="freq-hint" style="margin-top:-8px;margin-bottom:14px;">Leave either blank for no limit — e.g. set only an end date for a huddle series that's wrapping up.</div>
     <div class="field"><label><input type="checkbox" id="bActive" ${v.active?'checked':''} style="width:auto;"> Active</label></div>
   `;
   const foot = `
@@ -1660,23 +1673,80 @@ function openBlockForm(editId){
   `;
   showModal(existing?'Edit recurring block':'Add recurring block', body, foot);
   document.getElementById('bCancel').addEventListener('click', closeModal);
-  document.getElementById('bDelete')?.addEventListener('click', async ()=>{
-    await DB.delete('recurring_blocks', editId);
-    closeModal(); toast('Recurring block removed'); render();
-  });
+  document.getElementById('bDelete')?.addEventListener('click', ()=>{ closeModal(); openBlockCleanup(editId, true); });
   document.getElementById('bSave').addEventListener('click', async ()=>{
     const label = document.getElementById('bLabel').value.trim();
     if(!label){ toast('Label is required'); return; }
+    const startDate = document.getElementById('bStart').value || null;
+    const endDate = document.getElementById('bEnd').value || null;
+    if(startDate && endDate && startDate > endDate){ toast('Start date must be before the end date'); return; }
     const obj = {
       label,
       weekday: Number(document.getElementById('bWeekday').value),
       time: document.getElementById('bTime').value,
+      startDate,
+      endDate,
       active: document.getElementById('bActive').checked,
       createdAt: existing?.createdAt || new Date().toISOString(),
     };
     if(existing) obj.id = existing.id;
     await DB.put('recurring_blocks', obj);
     closeModal(); toast(existing?'Recurring block updated':'Recurring block added'); render();
+  });
+}
+
+/* ---------- bulk cleanup of already-materialized recurring block instances ---------- */
+async function deleteBlockInstances(label, fromDate){
+  const toDelete = state.cache.events.filter(e => e.type==='block' && e.title===label && (!fromDate || e.date>=fromDate));
+  for(const e of toDelete) await DB.delete('events', e.id);
+  return toDelete.length;
+}
+function openBlockCleanup(blockId, removeTemplateToo){
+  const b = (state.cache.recurringBlocks||[]).find(x=>x.id===blockId);
+  if(!b) return;
+  const today = todayISO();
+  const title = removeTemplateToo ? 'Remove recurring block' : 'Clear instances';
+  const intro = removeTemplateToo
+    ? `Remove <strong>${escapeHTML(b.label)}</strong> (every ${DOW_SHORT[b.weekday-1]}). What should happen to the entries already on the board?`
+    : `Bulk-delete already-created entries for <strong>${escapeHTML(b.label)}</strong>. The recurring rule keeps running afterwards and will keep creating new ones.`;
+  const body = `
+    <p style="font-size:13px;margin-bottom:12px;line-height:1.5;">${intro}</p>
+    <div class="field">
+      ${removeTemplateToo ? `
+      <label style="display:flex;gap:8px;font-weight:400;text-transform:none;margin-bottom:10px;align-items:flex-start;">
+        <input type="radio" name="delMode" value="keep" checked style="width:auto;margin-top:3px;">
+        <span><strong>Keep all entries</strong> — just stop creating new ones going forward.</span>
+      </label>` : ''}
+      <label style="display:flex;gap:8px;font-weight:400;text-transform:none;margin-bottom:10px;align-items:flex-start;">
+        <input type="radio" name="delMode" value="future" ${removeTemplateToo?'':'checked'} style="width:auto;margin-top:3px;">
+        <span><strong>Delete from a date onward</strong> — keeps history before that date.</span>
+      </label>
+      <input type="date" id="delFromDate" value="${today}" style="margin-left:24px;margin-bottom:10px;width:calc(100% - 24px);">
+      <label style="display:flex;gap:8px;font-weight:400;text-transform:none;align-items:flex-start;">
+        <input type="radio" name="delMode" value="all" style="width:auto;margin-top:3px;">
+        <span><strong>Delete every instance</strong> — past and future, permanently.</span>
+      </label>
+    </div>
+  `;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="cCancel">Cancel</button><button class="btn btn-danger" id="cConfirm">${removeTemplateToo?'Remove':'Delete'}</button></div>`;
+  showModal(title, body, foot);
+  document.getElementById('cCancel').addEventListener('click', closeModal);
+  document.getElementById('cConfirm').addEventListener('click', async ()=>{
+    const mode = document.querySelector('input[name="delMode"]:checked').value;
+    let deletedCount = 0;
+    if(mode==='all'){
+      deletedCount = await deleteBlockInstances(b.label, null);
+    } else if(mode==='future'){
+      const fromDate = document.getElementById('delFromDate').value || today;
+      deletedCount = await deleteBlockInstances(b.label, fromDate);
+    }
+    if(removeTemplateToo) await DB.delete('recurring_blocks', blockId);
+    closeModal();
+    const msg = removeTemplateToo
+      ? (deletedCount>0 ? `Removed — ${deletedCount} instance${deletedCount===1?'':'s'} also deleted` : 'Recurring block removed')
+      : `${deletedCount} instance${deletedCount===1?'':'s'} deleted`;
+    toast(msg);
+    render();
   });
 }
 function mountSettings(){
@@ -1692,10 +1762,8 @@ function mountSettings(){
   });
   document.getElementById('addBlockBtn').addEventListener('click', ()=>openBlockForm());
   document.querySelectorAll('[data-edit-block]').forEach(b=>b.addEventListener('click', ()=>openBlockForm(Number(b.dataset.editBlock))));
-  document.querySelectorAll('[data-del-block]').forEach(b=>b.addEventListener('click', async ()=>{
-    await DB.delete('recurring_blocks', Number(b.dataset.delBlock));
-    toast('Recurring block removed'); render();
-  }));
+  document.querySelectorAll('[data-clear-block]').forEach(b=>b.addEventListener('click', ()=>openBlockCleanup(Number(b.dataset.clearBlock), false)));
+  document.querySelectorAll('[data-del-block]').forEach(b=>b.addEventListener('click', ()=>openBlockCleanup(Number(b.dataset.delBlock), true)));
   document.getElementById('exportBtn').addEventListener('click', async ()=>{
     const data = {
       technicians: await DB.getAll('technicians'),
