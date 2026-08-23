@@ -49,18 +49,22 @@ const state = {
   searchQuery: '',
   searchTypeFilter: 'all',
   searchTimeFilter: 'all',
-  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[] },
+  fleetCheckTab: 'daily',
+  fleetCheckDate: new Date(),
+  fleetCheckMonth: new Date(),
+  reportsRange: 'month',
+  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[] },
 };
 
 async function refreshCache(){
-  const [technicians, sites, events, settings, recurringBlocks] = await Promise.all([
-    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks')
+  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords] = await Promise.all([
+    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records')
   ]);
   technicians.sort((a,b)=>a.name.localeCompare(b.name));
   sites.sort((a,b)=>a.name.localeCompare(b.name));
   events.sort((a,b)=>a.date.localeCompare(b.date));
   recurringBlocks.sort((a,b)=>a.weekday-b.weekday);
-  state.cache = { technicians, sites, events, settings, recurringBlocks };
+  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords };
 }
 
 /* ---------------- status / KPI computation ---------------- */
@@ -167,7 +171,7 @@ function showModal(titleHTML, bodyHTML, footHTML, opts){
 function closeModal(){ document.getElementById('modalBackdrop').hidden = true; }
 
 /* ---------------- routing ---------------- */
-const ROUTE_TITLES = { dashboard:'Dashboard', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', search:'Search', settings:'Settings' };
+const ROUTE_TITLES = { dashboard:'Dashboard', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', reports:'Reports', search:'Search', settings:'Settings' };
 
 function navigate(route){
   state.route = route;
@@ -190,6 +194,8 @@ async function render(){
     case 'schedule': main.innerHTML = renderSchedule(); mountSchedule(); break;
     case 'technicians': main.innerHTML = renderTechnicians(); mountTechnicians(); break;
     case 'sites': main.innerHTML = renderSites(); mountSites(); break;
+    case 'fleetcheck': main.innerHTML = renderFleetCheck(); mountFleetCheck(); break;
+    case 'reports': main.innerHTML = renderReports(); mountReports(); break;
     case 'search': main.innerHTML = renderSearch(); mountSearch(); break;
     case 'settings': main.innerHTML = renderSettings(); mountSettings(); break;
     default: main.innerHTML = renderDashboard(); mountDashboard();
@@ -462,6 +468,14 @@ function openEventForm(defaults, editId){
   const siteOptions = state.cache.sites.filter(s=>s.active).map(s=>`<option value="${s.id}" ${v.siteId==s.id?'selected':''}>${escapeHTML(s.name)}</option>`).join('');
   const typeOptions = Object.entries(EVENT_TYPES).map(([k,t])=>`<option value="${k}" ${v.type===k?'selected':''}>${t.label}</option>`).join('');
 
+  const activeTechs = state.cache.technicians.filter(t=>t.active);
+  const attendedSet = isEdit ? new Set(state.cache.huddleAttendance.filter(a=>a.eventId===editId && a.attended).map(a=>a.technicianId)) : new Set();
+  const attendanceRows = activeTechs.map(t=>`
+    <label style="display:flex;align-items:center;gap:8px;font-weight:400;text-transform:none;padding:4px 0;font-size:13px;color:var(--text);">
+      <input type="checkbox" class="fAttend" value="${t.id}" ${attendedSet.has(t.id)?'checked':''} style="width:auto;"> ${escapeHTML(t.name)}
+    </label>
+  `).join('');
+
   const body = `
     <div class="field-row">
       <div class="field"><label>Date</label><input type="date" id="fDate" value="${v.date}"></div>
@@ -475,6 +489,12 @@ function openEventForm(defaults, editId){
     <div class="field"><label><input type="checkbox" id="fCompleted" ${v.completed?'checked':''} style="width:auto;"> Completed</label>
       <div class="freq-hint">Unticked visits in the past show up as "missed" and don't count toward monthly/QA cadence tracking.</div>
     </div>
+    ${isEdit ? `
+    <div class="field" id="fAttendanceWrap" style="display:none;border-top:1px solid var(--line-soft);padding-top:14px;">
+      <label>Attendance</label>
+      <div id="fAttendanceList" style="max-height:220px;overflow-y:auto;">${attendanceRows}</div>
+      <div class="freq-hint">Tick who attended this one.</div>
+    </div>` : ''}
   `;
   const foot = `
     ${isEdit ? `<button class="btn btn-danger" id="fDelete">Delete</button>` : `<span></span>`}
@@ -489,6 +509,8 @@ function openEventForm(defaults, editId){
     const type = document.getElementById('fType').value;
     document.getElementById('fTechWrap').style.display = (type==='techVisit'||type==='oneOnOne'||type==='qaVisit') ? '' : 'none';
     document.getElementById('fSiteWrap').style.display = (type==='qaVisit'||type==='techVisit') ? '' : 'none';
+    const attWrap = document.getElementById('fAttendanceWrap');
+    if(attWrap) attWrap.style.display = (type==='block') ? '' : 'none';
   }
   document.getElementById('fType').addEventListener('change', syncVisibility);
   syncVisibility();
@@ -518,6 +540,12 @@ function openEventForm(defaults, editId){
     if(type==='qaVisit' && !obj.siteId && !obj.title){ obj.title = 'Site TBC'; }
     if(isEdit) obj.id = editId;
     await DB.put('events', obj);
+    if(isEdit && type==='block'){
+      const checked = Array.from(document.querySelectorAll('.fAttend:checked')).map(el=>Number(el.value));
+      const existingRows = state.cache.huddleAttendance.filter(a=>a.eventId===editId);
+      for(const row of existingRows) await DB.delete('huddle_attendance', row.id);
+      for(const technicianId of checked) await DB.add('huddle_attendance', { eventId: editId, technicianId, attended: true });
+    }
     closeModal(); toast(isEdit? 'Event updated':'Event added'); render();
   });
 }
@@ -1105,7 +1133,7 @@ function renderTechnicians(){
     const oo = oneOnOneStatus(t);
     const badge = st => st.state==='overdue' ? `<span class="badge badge-overdue">${st.label}</span>` : st.state==='due' ? `<span class="badge badge-due">${st.label}</span>` : st.state==='scheduled' ? `<span class="badge badge-scheduled">${st.label}</span>` : `<span class="badge badge-ok">${st.label}</span>`;
     return `<tr data-tech-row="${t.id}">
-      <td><div class="row-name">${escapeHTML(t.name)}</div>${t.area?`<div class="row-sub">${escapeHTML(t.area)}</div>`:''}${(t.workDays&&t.workDays.length&&t.workDays.length<5)?`<div class="row-sub">Contracted: ${t.workDays.map(d=>DOW_SHORT[d-1]).join(', ')}</div>`:''}</td>
+      <td><div class="row-name">${escapeHTML(t.name)}${t.isDriver?' <span class="badge badge-neutral" style="margin-left:4px;">Driver</span>':''}</div>${t.area?`<div class="row-sub">${escapeHTML(t.area)}</div>`:''}${(t.workDays&&t.workDays.length&&t.workDays.length<5)?`<div class="row-sub">Contracted: ${t.workDays.map(d=>DOW_SHORT[d-1]).join(', ')}</div>`:''}</td>
       <td data-label="Zone">${regionBadge(t.region)}</td>
       <td data-label="Tech visit">${badge(tv)}</td>
       <td data-label="1-1">${badge(oo)}</td>
@@ -1175,6 +1203,7 @@ function openTechnicianForm(editId){
       <div class="freq-hint">The schedule generator will only book this person's tech visits and 1-1s on these days.</div>
     </div>
     <div class="field"><label><input type="checkbox" id="tActive" ${v.active?'checked':''} style="width:auto;"> Active</label></div>
+    <div class="field"><label><input type="checkbox" id="tDriver" ${v.isDriver?'checked':''} style="width:auto;"> Driver <span style="font-weight:400;text-transform:none;color:var(--text-faint);">(subject to FleetCheck safety checks)</span></label></div>
     ${existing ? `
     <div class="field" style="border-top:1px solid var(--line-soft);padding-top:14px;">
       <label>Holidays / absences</label>
@@ -1210,6 +1239,7 @@ function openTechnicianForm(editId){
       oneOnOneFrequencyDays: Number(document.getElementById('tFreqOO').value)||30,
       workDays: workDaysChecked,
       active: document.getElementById('tActive').checked,
+      isDriver: document.getElementById('tDriver').checked,
       createdAt: existing?.createdAt || new Date().toISOString(),
     };
     if(existing) obj.id = existing.id;
@@ -1472,6 +1502,225 @@ function confirmDeleteSite(id){
     `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="cCancel">Cancel</button><button class="btn btn-danger" id="cConfirm">Remove</button></div>`);
   document.getElementById('cCancel').addEventListener('click', closeModal);
   document.getElementById('cConfirm').addEventListener('click', async ()=>{ await DB.delete('sites', id); closeModal(); toast('Site removed'); render(); });
+}
+
+/* ================= FLEETCHECK ================= */
+function renderFleetCheck(){
+  const tab = state.fleetCheckTab;
+  const drivers = state.cache.technicians.filter(t=>t.isDriver && t.active);
+
+  let periodLabel, navHTML, doneIds, dateISO=null, isNonWorkingNote='';
+  if(tab==='daily'){
+    dateISO = toISO(state.fleetCheckDate);
+    doneIds = new Set(state.cache.fleetcheckRecords.filter(r=>r.checkType==='daily' && r.period===dateISO).map(r=>r.technicianId));
+    periodLabel = humanDate(dateISO);
+    navHTML = `<button class="btn btn-outline" id="fcPrev">‹ Prev day</button><button class="btn btn-outline" id="fcToday">Today</button><button class="btn btn-outline" id="fcNext">Next day ›</button>`;
+    const dow = fromISO(dateISO).getDay();
+    if(dow===0||dow===6) isNonWorkingNote = `<p style="font-size:12px;color:var(--text-faint);margin:-8px 0 14px;">Weekend — not counted as a required day in Reports, but you can still log a check here if someone worked.</p>`;
+  } else {
+    const monthISO = toISO(state.fleetCheckMonth).slice(0,7);
+    doneIds = new Set(state.cache.fleetcheckRecords.filter(r=>r.checkType==='monthly' && r.period===monthISO).map(r=>r.technicianId));
+    periodLabel = state.fleetCheckMonth.toLocaleString('en-GB',{month:'long', year:'numeric'});
+    navHTML = `<button class="btn btn-outline" id="fcPrev">‹ Prev month</button><button class="btn btn-outline" id="fcToday">This month</button><button class="btn btn-outline" id="fcNext">Next month ›</button>`;
+  }
+
+  const rows = drivers.map(d=>{
+    let awayTag = '';
+    if(tab==='daily' && dateISO){
+      const workDays = (d.workDays && d.workDays.length) ? d.workDays : [1,2,3,4,5];
+      const isoDow = (fromISO(dateISO).getDay()===0) ? 7 : fromISO(dateISO).getDay();
+      const onLeave = state.cache.events.some(e=>e.type==='techAbsence' && e.technicianId===d.id && e.date===dateISO);
+      if(onLeave) awayTag = `<span class="badge badge-neutral">On leave</span>`;
+      else if(!workDays.includes(isoDow)) awayTag = `<span class="badge badge-neutral">Not a work day</span>`;
+    }
+    return `
+    <div class="watch-row">
+      <button class="et-check ${doneIds.has(d.id)?'is-done':''}" data-fc-toggle="${d.id}" title="${doneIds.has(d.id)?'Mark not done':'Mark done'}">✓</button>
+      <div class="watch-name">${escapeHTML(d.name)}</div>
+      <div class="watch-spacer"></div>
+      ${awayTag}
+      ${regionBadge(d.region)}
+    </div>`;
+  }).join('');
+
+  return `
+  <div class="view-head">
+    <div><h1>FleetCheck</h1><div class="view-sub">Driver safety-check completion — ${periodLabel}</div></div>
+    <div class="view-actions">${navHTML}</div>
+  </div>
+  <div class="toolbar"><div class="chip-filter">
+    <button class="chip ${tab==='daily'?'active':''}" data-fc-tab="daily">Daily checks</button>
+    <button class="chip ${tab==='monthly'?'active':''}" data-fc-tab="monthly">Monthly checks</button>
+  </div></div>
+  ${isNonWorkingNote}
+  <div class="kpi-grid" style="margin-bottom:18px;">
+    <div class="card kpi-card">
+      <div class="kpi-label">Completed</div>
+      <div class="kpi-value">${doneIds.size} <span style="font-size:15px;color:var(--text-dim);">/ ${drivers.length} drivers</span></div>
+    </div>
+  </div>
+  ${drivers.length ? `<div class="card" style="padding:6px 8px;">${rows}</div>` : `<div class="card empty"><h3>No drivers yet</h3><p>Edit a technician and tick "Driver" to see them here.</p></div>`}
+  `;
+}
+function mountFleetCheck(){
+  document.querySelectorAll('[data-fc-tab]').forEach(b=>b.addEventListener('click', ()=>{ state.fleetCheckTab = b.dataset.fcTab; render(); }));
+  document.getElementById('fcPrev')?.addEventListener('click', ()=>{
+    if(state.fleetCheckTab==='daily') state.fleetCheckDate = addDays(state.fleetCheckDate,-1);
+    else state.fleetCheckMonth = new Date(state.fleetCheckMonth.getFullYear(), state.fleetCheckMonth.getMonth()-1, 1);
+    render();
+  });
+  document.getElementById('fcNext')?.addEventListener('click', ()=>{
+    if(state.fleetCheckTab==='daily') state.fleetCheckDate = addDays(state.fleetCheckDate,1);
+    else state.fleetCheckMonth = new Date(state.fleetCheckMonth.getFullYear(), state.fleetCheckMonth.getMonth()+1, 1);
+    render();
+  });
+  document.getElementById('fcToday')?.addEventListener('click', ()=>{
+    state.fleetCheckDate = new Date();
+    state.fleetCheckMonth = new Date();
+    render();
+  });
+  document.querySelectorAll('[data-fc-toggle]').forEach(b=>b.addEventListener('click', async ()=>{
+    const technicianId = Number(b.dataset.fcToggle);
+    const checkType = state.fleetCheckTab;
+    const period = checkType==='daily' ? toISO(state.fleetCheckDate) : toISO(state.fleetCheckMonth).slice(0,7);
+    const existingRec = state.cache.fleetcheckRecords.find(r=>r.technicianId===technicianId && r.checkType===checkType && r.period===period);
+    if(existingRec) await DB.delete('fleetcheck_records', existingRec.id);
+    else await DB.add('fleetcheck_records', { technicianId, checkType, period, completed:true, notes:'', createdAt:new Date().toISOString() });
+    render();
+  }));
+}
+
+/* ================= REPORTS ================= */
+function buildHuddleAttendanceReport(startISO, endISO){
+  const huddleEvents = state.cache.events.filter(e=>e.type==='block' && e.date>=startISO && e.date<=endISO);
+  const techs = state.cache.technicians.filter(t=>t.active);
+  const attendance = state.cache.huddleAttendance;
+  return techs.map(t=>{
+    const attended = attendance.filter(a=>a.technicianId===t.id && a.attended && huddleEvents.some(e=>e.id===a.eventId)).length;
+    const total = huddleEvents.length;
+    return { Technician: t.name, 'Huddles in range': total, Attended: attended, 'Attendance %': total ? Math.round(attended/total*100)+'%' : '—' };
+  });
+}
+function requiredWorkingDays(technician, startISO, endISO){
+  // days this technician is actually expected to be working: their own contracted
+  // days (defaults Mon-Fri, so weekends are excluded automatically), minus any
+  // logged holiday/absence — matches the same rules the schedule generator uses.
+  const workDays = (technician.workDays && technician.workDays.length) ? technician.workDays : [1,2,3,4,5];
+  const absenceDates = new Set(
+    state.cache.events.filter(e => e.type==='techAbsence' && e.technicianId===technician.id).map(e=>e.date)
+  );
+  const startD = fromISO(startISO);
+  const totalDays = daysBetween(startISO, endISO) + 1;
+  let count = 0;
+  for(let i=0;i<totalDays;i++){
+    const d = addDays(startD, i);
+    const iso = toISO(d);
+    const dow = d.getDay(); const isoDow = dow===0?7:dow;
+    if(!workDays.includes(isoDow)) continue;
+    if(absenceDates.has(iso)) continue;
+    count++;
+  }
+  return count;
+}
+function buildFleetCheckDailyReport(startISO, endISO){
+  const drivers = state.cache.technicians.filter(t=>t.isDriver && t.active);
+  const records = state.cache.fleetcheckRecords.filter(r=>r.checkType==='daily' && r.period>=startISO && r.period<=endISO);
+  return drivers.map(d=>{
+    const completed = records.filter(r=>r.technicianId===d.id).length;
+    const required = requiredWorkingDays(d, startISO, endISO);
+    return { Driver: d.name, 'Working days in range': required, Completed: completed, 'Completion %': required ? Math.round(completed/required*100)+'%' : '—' };
+  });
+}
+function buildFleetCheckMonthlyReport(startISO, endISO){
+  const drivers = state.cache.technicians.filter(t=>t.isDriver && t.active);
+  const months = [];
+  let cur = new Date(fromISO(startISO).getFullYear(), fromISO(startISO).getMonth(), 1);
+  const endD = fromISO(endISO);
+  while(cur <= endD){
+    months.push(toISO(cur).slice(0,7));
+    cur = new Date(cur.getFullYear(), cur.getMonth()+1, 1);
+  }
+  const records = state.cache.fleetcheckRecords.filter(r=>r.checkType==='monthly' && months.includes(r.period));
+  return drivers.map(d=>{
+    const completed = records.filter(r=>r.technicianId===d.id).length;
+    return { Driver: d.name, 'Months in range': months.length, Completed: completed, 'Completion %': months.length ? Math.round(completed/months.length*100)+'%' : '—' };
+  });
+}
+function reportTableHTML(rows, emptyMsg){
+  if(!rows.length) return `<p style="font-size:12.5px;color:var(--text-faint);padding:12px 0;">${emptyMsg}</p>`;
+  const headers = Object.keys(rows[0]);
+  return `<div class="table-wrap"><table>
+    <thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(r=>`<tr>${headers.map(h=>`<td>${escapeHTML(String(r[h]))}</td>`).join('')}</tr>`).join('')}</tbody>
+  </table></div>`;
+}
+function reportsRangeISO(){
+  const range = state.reportsRange;
+  const now = new Date();
+  const wkStartISO = toISO(mondayOf(now));
+  const wkEndISO = toISO(addDays(mondayOf(now),6));
+  const moStartISO = toISO(new Date(now.getFullYear(), now.getMonth(), 1));
+  const moEndISO = toISO(new Date(now.getFullYear(), now.getMonth()+1, 0));
+  if(range==='week') return { startISO:wkStartISO, endISO:wkEndISO };
+  if(range==='month') return { startISO:moStartISO, endISO:moEndISO };
+  return { startISO: state.reportsCustomStart || moStartISO, endISO: state.reportsCustomEnd || moEndISO };
+}
+function renderReports(){
+  const { startISO, endISO } = reportsRangeISO();
+  const range = state.reportsRange;
+  const huddleRows = buildHuddleAttendanceReport(startISO, endISO);
+  const dailyRows = buildFleetCheckDailyReport(startISO, endISO);
+  const monthlyRows = buildFleetCheckMonthlyReport(startISO, endISO);
+
+  return `
+  <div class="view-head">
+    <div><h1>Reports</h1><div class="view-sub">${humanDate(startISO)} – ${humanDate(endISO)}</div></div>
+    <div class="view-actions">
+      <select id="repRange" style="width:auto;">
+        <option value="week" ${range==='week'?'selected':''}>This week</option>
+        <option value="month" ${range==='month'?'selected':''}>This month</option>
+        <option value="custom" ${range==='custom'?'selected':''}>Custom range</option>
+      </select>
+    </div>
+  </div>
+  <div class="field-row" id="repCustomRange" style="display:${range==='custom'?'flex':'none'};max-width:420px;margin-bottom:18px;">
+    <div class="field"><label>Start</label><input type="date" id="repStart" value="${startISO}"></div>
+    <div class="field"><label>End</label><input type="date" id="repEnd" value="${endISO}"></div>
+  </div>
+  <div class="card" style="margin-bottom:18px;">
+    <div class="panel-title"><h3>Huddle attendance</h3><button class="icon-btn" id="repExportHuddle">Export CSV</button></div>
+    <div class="panel-body" style="padding:6px 14px 14px;">${reportTableHTML(huddleRows, 'No active technicians to report on.')}</div>
+  </div>
+  <div class="card" style="margin-bottom:18px;">
+    <div class="panel-title"><h3>FleetCheck — daily</h3><button class="icon-btn" id="repExportDaily">Export CSV</button></div>
+    <div class="panel-body" style="padding:6px 14px 14px;">${reportTableHTML(dailyRows, 'No drivers flagged yet — edit a technician and tick "Driver" to see them here.')}</div>
+  </div>
+  <div class="card">
+    <div class="panel-title"><h3>FleetCheck — monthly</h3><button class="icon-btn" id="repExportMonthly">Export CSV</button></div>
+    <div class="panel-body" style="padding:6px 14px 14px;">${reportTableHTML(monthlyRows, 'No drivers flagged yet — edit a technician and tick "Driver" to see them here.')}</div>
+  </div>
+  `;
+}
+function mountReports(){
+  document.getElementById('repRange').addEventListener('change', (e)=>{ state.reportsRange = e.target.value; render(); });
+  document.getElementById('repStart')?.addEventListener('change', (e)=>{ state.reportsCustomStart = e.target.value; render(); });
+  document.getElementById('repEnd')?.addEventListener('change', (e)=>{ state.reportsCustomEnd = e.target.value; render(); });
+  const { startISO, endISO } = reportsRangeISO();
+  document.getElementById('repExportHuddle')?.addEventListener('click', ()=>{
+    const rows = buildHuddleAttendanceReport(startISO, endISO);
+    if(!rows.length){ toast('Nothing to export'); return; }
+    exportCSV(rows, `huddle-attendance_${startISO}_to_${endISO}`);
+  });
+  document.getElementById('repExportDaily')?.addEventListener('click', ()=>{
+    const rows = buildFleetCheckDailyReport(startISO, endISO);
+    if(!rows.length){ toast('Nothing to export'); return; }
+    exportCSV(rows, `fleetcheck-daily_${startISO}_to_${endISO}`);
+  });
+  document.getElementById('repExportMonthly')?.addEventListener('click', ()=>{
+    const rows = buildFleetCheckMonthlyReport(startISO, endISO);
+    if(!rows.length){ toast('Nothing to export'); return; }
+    exportCSV(rows, `fleetcheck-monthly_${startISO}_to_${endISO}`);
+  });
 }
 
 /* ================= SEARCH ================= */
