@@ -257,6 +257,8 @@ label{ display:block; font-size:12px; font-weight:600; color:var(--text-dim); ma
 .event-tag.type-oneOnOne{ border-left-color:var(--outside); background:var(--outside-bg); }
 .event-tag.type-wfh{ border-left-color:var(--text-faint); background:var(--paper-dim); }
 .event-tag.type-leave{ border-left-color:var(--clay); background:var(--clay-bg); }
+.event-tag.type-techAbsence{ border-left-color:var(--clay); background:var(--clay-bg); }
+.event-tag.type-block{ border-left-color:var(--west); background:var(--west-bg); }
 .event-tag.type-other{ border-left-color:var(--east); background:var(--east-bg); }
 
 .et-check{

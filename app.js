@@ -30,12 +30,14 @@ const REGIONS = {
   outside:  { label:'Outside London', badge:'badge-outside' },
 };
 const EVENT_TYPES = {
-  techVisit: { label:'Tech visit', short:'Tech visit' },
-  qaVisit:   { label:'QA visit', short:'QA visit' },
-  oneOnOne:  { label:'1-1', short:'1-1' },
-  wfh:       { label:'Working from home', short:'WFH' },
-  leave:     { label:'Annual leave', short:'AL' },
-  other:     { label:'Other / admin', short:'Other' },
+  techVisit:   { label:'Tech visit', short:'Tech visit' },
+  qaVisit:     { label:'QA visit', short:'QA visit' },
+  oneOnOne:    { label:'1-1', short:'1-1' },
+  wfh:         { label:'Working from home', short:'WFH' },
+  leave:       { label:'Annual leave', short:'AL' },
+  techAbsence: { label:'Absence', short:'Absence' },
+  block:       { label:'Recurring block', short:'Block' },
+  other:       { label:'Other / admin', short:'Other' },
 };
 
 /* ---------------- app state ---------------- */
@@ -47,17 +49,18 @@ const state = {
   searchQuery: '',
   searchTypeFilter: 'all',
   searchTimeFilter: 'all',
-  cache: { technicians:[], sites:[], events:[], settings:null },
+  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[] },
 };
 
 async function refreshCache(){
-  const [technicians, sites, events, settings] = await Promise.all([
-    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings')
+  const [technicians, sites, events, settings, recurringBlocks] = await Promise.all([
+    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks')
   ]);
   technicians.sort((a,b)=>a.name.localeCompare(b.name));
   sites.sort((a,b)=>a.name.localeCompare(b.name));
   events.sort((a,b)=>a.date.localeCompare(b.date));
-  state.cache = { technicians, sites, events, settings };
+  recurringBlocks.sort((a,b)=>a.weekday-b.weekday);
+  state.cache = { technicians, sites, events, settings, recurringBlocks };
 }
 
 /* ---------------- status / KPI computation ---------------- */
@@ -178,6 +181,10 @@ function navigate(route){
 async function render(){
   const main = document.getElementById('main');
   await refreshCache();
+  if(state.route === 'schedule' || state.route === 'dashboard'){
+    const created = await materializeRecurringBlocks(toISO(state.weekStart), toISO(addDays(state.weekStart,6)));
+    if(created) await refreshCache();
+  }
   switch(state.route){
     case 'dashboard': main.innerHTML = renderDashboard(); mountDashboard(); break;
     case 'schedule': main.innerHTML = renderSchedule(); mountSchedule(); break;
@@ -259,7 +266,7 @@ function renderDashboard(){
       <div class="view-sub">Week of ${humanDate(toISO(state.weekStart))} — overview across ${techs.length} technician${techs.length===1?'':'s'} and ${sites.length} client site${sites.length===1?'':'s'}</div>
     </div>
     <div class="view-actions">
-      <button class="btn btn-outline" data-route="schedule">Open weekly board</button>
+      <button class="btn btn-outline" id="openWeeklyBoardBtn">Open weekly board</button>
       <button class="btn" id="dashAddEvent">+ Log a visit</button>
     </div>
   </div>
@@ -342,7 +349,7 @@ function renderDashboard(){
   `;
 }
 function mountDashboard(){
-  document.querySelectorAll('[data-route]').forEach(b=>b.addEventListener('click', ()=>navigate(b.dataset.route)));
+  document.getElementById('openWeeklyBoardBtn')?.addEventListener('click', ()=>navigate('schedule'));
   document.getElementById('dashAddEvent')?.addEventListener('click', ()=>openEventForm({ date: todayISO() }));
   document.getElementById('dashGenerate')?.addEventListener('click', ()=>openGenerateModal());
   document.querySelectorAll('[data-open-tech]').forEach(el=>el.addEventListener('click', ()=>openTechnicianForm(Number(el.dataset.openTech))));
@@ -515,6 +522,82 @@ function openEventForm(defaults, editId){
   });
 }
 
+/* ================= RECURRING BLOCKS ================= */
+async function materializeRecurringBlocks(startISO, endISO){
+  const templates = (state.cache.recurringBlocks || []).filter(b => b.active);
+  if(!templates.length) return false;
+  const existingKeys = new Set(
+    state.cache.events
+      .filter(e => e.type==='block' && e.date>=startISO && e.date<=endISO)
+      .map(e => `${e.date}|${e.title}`)
+  );
+  const startD = fromISO(startISO);
+  const totalDays = daysBetween(startISO, endISO) + 1;
+  let created = false;
+  for(let i=0;i<totalDays;i++){
+    const d = addDays(startD, i);
+    const iso = toISO(d);
+    const dow = d.getDay(); const isoDow = dow===0?7:dow;
+    for(const tmpl of templates){
+      if(tmpl.weekday !== isoDow) continue;
+      const key = `${iso}|${tmpl.label}`;
+      if(existingKeys.has(key)) continue;
+      await DB.add('events', { date:iso, type:'block', technicianId:null, siteId:null, time:tmpl.time||'', title:tmpl.label, notes:'', completed:true, createdAt:new Date().toISOString() });
+      existingKeys.add(key);
+      created = true;
+    }
+  }
+  return created;
+}
+
+/* ---------- technician absences (holidays, sick days, etc.) ---------- */
+function getTechAbsenceRanges(technicianId){
+  const dates = state.cache.events
+    .filter(e => e.type==='techAbsence' && e.technicianId===technicianId)
+    .map(e => e.date)
+    .sort();
+  const ranges = [];
+  for(const d of dates){
+    const last = ranges[ranges.length-1];
+    if(last && isoAddDays(last.end,1)===d) last.end = d;
+    else ranges.push({ start:d, end:d });
+  }
+  return ranges;
+}
+async function removeTechAbsenceRange(technicianId, start, end){
+  const toDelete = state.cache.events.filter(e => e.type==='techAbsence' && e.technicianId===technicianId && e.date>=start && e.date<=end);
+  for(const e of toDelete) await DB.delete('events', e.id);
+  await refreshCache();
+}
+function openAbsenceForm(technicianId){
+  const today = todayISO();
+  const body = `
+    <div class="field-row">
+      <div class="field"><label>Start date</label><input type="date" id="absStart" value="${today}"></div>
+      <div class="field"><label>End date</label><input type="date" id="absEnd" value="${today}"></div>
+    </div>
+    <div class="field"><label>Label (optional)</label><input id="absLabel" placeholder="e.g. Annual leave, sick day…"></div>
+  `;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="absCancel">Cancel</button><button class="btn" id="absSave">Add</button></div>`;
+  showModal('Add holiday / absence', body, foot);
+  document.getElementById('absCancel').addEventListener('click', ()=>openTechnicianForm(technicianId));
+  document.getElementById('absSave').addEventListener('click', async ()=>{
+    const start = document.getElementById('absStart').value;
+    const end = document.getElementById('absEnd').value;
+    const label = document.getElementById('absLabel').value.trim();
+    if(!start || !end || start > end){ toast('Pick a valid date range'); return; }
+    let d = start, guard = 0;
+    while(d <= end && guard < 400){
+      guard++;
+      await DB.add('events', { date:d, type:'techAbsence', technicianId, siteId:null, time:'', title:label, notes:'', completed:true, createdAt:new Date().toISOString() });
+      d = isoAddDays(d,1);
+    }
+    toast('Absence added');
+    await refreshCache();
+    openTechnicianForm(technicianId);
+  });
+}
+
 /* ================= SCHEDULE GENERATOR =================
    Fills a date range with tech visits, QA visits and 1-1s:
    - every active technician gets at least one tech visit and one 1-1
@@ -592,6 +675,18 @@ async function generateSchedule({ startISO, weeks, overwrite }){
   const weekKeys = [...new Set(days.map(d=>d.weekKey))];
   const isoToWeek = {}; days.forEach(d=> isoToWeek[d.iso]=d.weekKey);
   const techById = {}; state.cache.technicians.forEach(t=> techById[t.id]=t);
+  const absenceSet = new Set(
+    state.cache.events.filter(e=>e.type==='techAbsence').map(e=>`${e.technicianId}|${e.date}`)
+  );
+  function isTechAvailable(tech, iso){
+    if(!tech) return true;
+    const d = fromISO(iso);
+    const dow = d.getDay(); const isoDow = dow===0?7:dow;
+    const workDays = (tech.workDays && tech.workDays.length) ? tech.workDays : [1,2,3,4,5];
+    if(!workDays.includes(isoDow)) return false;
+    if(absenceSet.has(`${tech.id}|${iso}`)) return false;
+    return true;
+  }
 
   const dayMap = {};
   days.forEach(d=> dayMap[d.iso] = { techIds:new Set(), siteIds:new Set(), ooTechIds:new Set(), techCount:0, qaCount:0, ooCount:0, soloLock:false, kind:null });
@@ -642,6 +737,7 @@ async function generateSchedule({ startISO, weeks, overwrite }){
       if(dm.soloLock) return false;
       const tech = techById[extra.technicianId];
       const isOutside = tech && tech.region==='outside';
+      if(!isTechAvailable(tech, iso)) return false;
       if(isOutside){ if(dm.techCount>0) return false; }
       else if(dm.techCount>=MAX_TECH_PER_DAY) return false;
       if(extra.technicianId && dm.techIds.has(extra.technicianId)) return false;
@@ -654,6 +750,7 @@ async function generateSchedule({ startISO, weeks, overwrite }){
       const wk = isoToWeek[iso];
       if((weeklyOOCount[wk]||0) >= MAX_OO_PER_WEEK) return false;
       if(dm.kind==='tech') return false; // 1-1s pair with QA days (or WFH), not tech-visit days
+      if(!isTechAvailable(techById[extra.technicianId], iso)) return false;
       if(dm.ooCount>=MAX_OO_PER_DAY || (extra.technicianId && dm.ooTechIds.has(extra.technicianId))) return false;
     }
     newEvents.push({ date:iso, type, technicianId:extra.technicianId||null, siteId:extra.siteId||null, time:extra.time||'', title:extra.title||'', notes:'Auto-generated', completed: iso<=todayISO(), createdAt:new Date().toISOString() });
@@ -690,10 +787,18 @@ async function generateSchedule({ startISO, weeks, overwrite }){
     for(const region of regionOrder){
       const bucket = tvBuckets[region];
       let guard = 0;
-      while(bucket.length && cursor < workDays.length && guard < 5000){
+      while(bucket.length && guard < 5000){
         guard++;
         const day = workDays[cursor % workDays.length];
         const item = bucket[0];
+        if(!isTechAvailable(item.t, day.iso)){
+          // this person can't work today (contracted days / absence) — see if a regionmate can,
+          // without burning the shared day-cursor everyone else relies on
+          bucket.push(bucket.shift());
+          if(bucket[0] === item) cursor++; // whole bucket tried today, nobody fits — move to next day
+          if(cursor > workDays.length*8) break; // safety valve — out of room in this range
+          continue;
+        }
         if(addEvent(day.iso, 'techVisit', { technicianId:item.t.id })){
           bucket.shift();
           // fill this day up to the cap before moving on (outside-London solo days are full after one)
@@ -701,7 +806,7 @@ async function generateSchedule({ startISO, weeks, overwrite }){
         } else {
           cursor++;
         }
-        if(cursor > workDays.length*6) break; // out of room in this range
+        if(cursor > workDays.length*8) break; // safety valve — out of room in this range
       }
     }
     // top up weeks that are still under the weekly target (but never over it — addEvent enforces the cap)
@@ -783,15 +888,22 @@ async function generateSchedule({ startISO, weeks, overwrite }){
     }
   }
 
-  /* ---- 1-1s: WFH day first (Teams call), spill onto working days if needed — capped at 2/day ---- */
+  /* ---- 1-1s: WFH day first (Teams call), spill onto working days if needed — capped at 2/day ----
+     A technician unavailable that day (contracted days / absence) is skipped in favour of the next
+     queued person, rather than stalling the whole slot. */
   const ooQueue = techs.map(t=>({t, st:oneOnOneStatus(t)})).sort((a,b)=> a.st.dueISO.localeCompare(b.st.dueISO));
   for(const wfhDay of wfhDays){
     let timeIdx = 0;
-    while(ooQueue.length && dayMap[wfhDay.iso].ooCount < MAX_OO_PER_DAY){
-      const item = ooQueue[0];
+    let attempts = 0;
+    while(ooQueue.length && dayMap[wfhDay.iso].ooCount < MAX_OO_PER_DAY && attempts < ooQueue.length){
+      const item = ooQueue[attempts];
       if(addEvent(wfhDay.iso, 'oneOnOne', { technicianId:item.t.id, time:OO_TIMES[timeIdx % OO_TIMES.length] })){
-        ooQueue.shift(); timeIdx++;
-      } else break;
+        ooQueue.splice(attempts, 1);
+        timeIdx++;
+        attempts = 0; // queue shifted — restart the scan from the front
+      } else {
+        attempts++;
+      }
     }
   }
   if(ooQueue.length && workDays.length){
@@ -799,16 +911,17 @@ async function generateSchedule({ startISO, weeks, overwrite }){
     const qaKindDays = workDays.filter(d=>dayMap[d.iso].kind==='qa');
     const freeDays = workDays.filter(d=>!dayMap[d.iso].kind);
     const spillOrder = [...qaKindDays, ...freeDays];
-    let cursor = 0, guard=0;
-    while(ooQueue.length && spillOrder.length && guard<2000){
-      guard++;
-      const day = spillOrder[cursor % spillOrder.length];
-      const item = ooQueue[0];
-      if(addEvent(day.iso, 'oneOnOne', { technicianId:item.t.id })){
-        ooQueue.shift();
+    if(spillOrder.length){
+      let stuck = 0;
+      while(ooQueue.length && stuck < ooQueue.length){
+        const item = ooQueue[0];
+        let placed = false;
+        for(const day of spillOrder){
+          if(addEvent(day.iso, 'oneOnOne', { technicianId:item.t.id })){ placed = true; break; }
+        }
+        if(placed){ ooQueue.shift(); stuck = 0; }
+        else { ooQueue.push(ooQueue.shift()); stuck++; } // can't fit this one anywhere — try the next person
       }
-      cursor++;
-      if(cursor>spillOrder.length*4) break; // no room left, give up gracefully
     }
   }
 
@@ -990,7 +1103,7 @@ function renderTechnicians(){
     const oo = oneOnOneStatus(t);
     const badge = st => st.state==='overdue' ? `<span class="badge badge-overdue">${st.label}</span>` : st.state==='due' ? `<span class="badge badge-due">${st.label}</span>` : st.state==='scheduled' ? `<span class="badge badge-scheduled">${st.label}</span>` : `<span class="badge badge-ok">${st.label}</span>`;
     return `<tr data-tech-row="${t.id}">
-      <td><div class="row-name">${escapeHTML(t.name)}</div>${t.area?`<div class="row-sub">${escapeHTML(t.area)}</div>`:''}</td>
+      <td><div class="row-name">${escapeHTML(t.name)}</div>${t.area?`<div class="row-sub">${escapeHTML(t.area)}</div>`:''}${(t.workDays&&t.workDays.length&&t.workDays.length<5)?`<div class="row-sub">Contracted: ${t.workDays.map(d=>DOW_SHORT[d-1]).join(', ')}</div>`:''}</td>
       <td data-label="Zone">${regionBadge(t.region)}</td>
       <td data-label="Tech visit">${badge(tv)}</td>
       <td data-label="1-1">${badge(oo)}</td>
@@ -1027,8 +1140,24 @@ function mountTechnicians(){
 }
 function openTechnicianForm(editId){
   const existing = editId ? state.cache.technicians.find(t=>t.id===editId) : null;
-  const v = existing || { name:'', region:'east', area:'', techFrequencyDays:30, oneOnOneFrequencyDays:30, active:true };
+  const v = existing || { name:'', region:'east', area:'', techFrequencyDays:30, oneOnOneFrequencyDays:30, active:true, workDays:[1,2,3,4,5] };
   const regionOptions = Object.entries(REGIONS).map(([k,r])=>`<option value="${k}" ${v.region===k?'selected':''}>${r.label}</option>`).join('');
+  const workDays = (v.workDays && v.workDays.length) ? v.workDays : [1,2,3,4,5];
+  const dayChecks = DOW_SHORT.map((d,i)=>{
+    const dayNum = i+1;
+    return `<label style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:12.5px;font-weight:600;color:var(--text-dim);text-transform:none;">
+      <input type="checkbox" class="tWorkDay" value="${dayNum}" ${workDays.includes(dayNum)?'checked':''} style="width:auto;"> ${d}
+    </label>`;
+  }).join('');
+
+  const absenceRanges = existing ? getTechAbsenceRanges(existing.id) : [];
+  const absenceRows = absenceRanges.length ? absenceRanges.map(r=>`
+    <div class="watch-row" style="padding:7px 0;">
+      <div class="watch-name" style="font-size:12.5px;font-weight:600;">${r.start===r.end ? humanDate(r.start) : `${humanDateShort(r.start)} – ${humanDate(r.end)}`}</div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-remove-absence="${r.start}|${r.end}">Remove</button>
+    </div>
+  `).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No holidays/absences logged.</p>`;
 
   const body = `
     <div class="field"><label>Name</label><input id="tName" value="${escapeHTML(v.name)}" placeholder="Full name"></div>
@@ -1038,7 +1167,19 @@ function openTechnicianForm(editId){
       <div class="field"><label>Tech visit every (days)</label><input type="number" id="tFreqVisit" value="${v.techFrequencyDays}" min="7"></div>
       <div class="field"><label>1-1 every (days)</label><input type="number" id="tFreqOO" value="${v.oneOnOneFrequencyDays}" min="7"></div>
     </div>
+    <div class="field">
+      <label>Contracted days</label>
+      <div>${dayChecks}</div>
+      <div class="freq-hint">The schedule generator will only book this person's tech visits and 1-1s on these days.</div>
+    </div>
     <div class="field"><label><input type="checkbox" id="tActive" ${v.active?'checked':''} style="width:auto;"> Active</label></div>
+    ${existing ? `
+    <div class="field" style="border-top:1px solid var(--line-soft);padding-top:14px;">
+      <label>Holidays / absences</label>
+      <div id="tAbsenceList">${absenceRows}</div>
+      <button class="btn btn-outline btn-small" id="tAddAbsence" type="button" style="margin-top:6px;">+ Add holiday/absence</button>
+      <div class="freq-hint">Days marked here are skipped entirely when generating this technician's schedule.</div>
+    </div>` : `<p class="freq-hint">Save this technician first to add holidays/absences.</p>`}
   `;
   const foot = `
     ${existing ? `<button class="btn btn-danger" id="tDelete">Remove</button>` : `<span></span>`}
@@ -1047,15 +1188,25 @@ function openTechnicianForm(editId){
   showModal(existing?'Edit technician':'Add technician', body, foot);
   document.getElementById('tCancel').addEventListener('click', closeModal);
   document.getElementById('tDelete')?.addEventListener('click', ()=>{ closeModal(); confirmDeleteTechnician(editId); });
+  document.getElementById('tAddAbsence')?.addEventListener('click', ()=>openAbsenceForm(existing.id));
+  document.querySelectorAll('[data-remove-absence]').forEach(b=>b.addEventListener('click', async ()=>{
+    const [start,end] = b.dataset.removeAbsence.split('|');
+    await removeTechAbsenceRange(existing.id, start, end);
+    toast('Absence removed');
+    openTechnicianForm(existing.id);
+  }));
   document.getElementById('tSave').addEventListener('click', async ()=>{
     const name = document.getElementById('tName').value.trim();
     if(!name){ toast('Name is required'); return; }
+    const workDaysChecked = Array.from(document.querySelectorAll('.tWorkDay:checked')).map(el=>Number(el.value)).sort((a,b)=>a-b);
+    if(workDaysChecked.length===0){ toast('Pick at least one contracted day'); return; }
     const obj = {
       name,
       region: document.getElementById('tRegion').value,
       area: document.getElementById('tArea').value.trim(),
       techFrequencyDays: Number(document.getElementById('tFreqVisit').value)||30,
       oneOnOneFrequencyDays: Number(document.getElementById('tFreqOO').value)||30,
+      workDays: workDaysChecked,
       active: document.getElementById('tActive').checked,
       createdAt: existing?.createdAt || new Date().toISOString(),
     };
@@ -1451,6 +1602,15 @@ function renderSearchResults(){
 /* ================= SETTINGS ================= */
 function renderSettings(){
   const s = state.cache.settings || { techVisitsPerWeekMin:3, qaVisitsPerWeekMin:4, oneOnOnesPerWeekMax:3, wfhWeekday:3 };
+  const blocks = state.cache.recurringBlocks || [];
+  const blockRows = blocks.length ? blocks.map(b=>`
+    <div class="watch-row">
+      <div><div class="watch-name">${escapeHTML(b.label)}</div><div class="watch-meta">Every ${DOW_SHORT[b.weekday-1]}${b.time?' · '+b.time:''}${b.active?'':' · Inactive'}</div></div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-edit-block="${b.id}">Edit</button>
+      <button class="icon-btn" data-del-block="${b.id}">Remove</button>
+    </div>
+  `).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No recurring blocks yet.</p>`;
   return `
   <div class="view-head"><div><h1>Settings</h1><div class="view-sub">KPI targets and defaults</div></div></div>
   <div class="card card-pad" style="max-width:480px;">
@@ -1467,6 +1627,12 @@ function renderSettings(){
     <button class="btn" id="setSave">Save settings</button>
   </div>
   <div class="card card-pad" style="max-width:480px;margin-top:16px;">
+    <h3 style="margin-bottom:4px;">Recurring blocked events</h3>
+    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Weekly commitments like Teams huddles or an extra WFH day. These appear on the board automatically every week but don't stop tech/QA visits being booked alongside them.</p>
+    <div id="blockList">${blockRows}</div>
+    <button class="btn btn-outline btn-small" id="addBlockBtn" style="margin-top:8px;">+ Add recurring block</button>
+  </div>
+  <div class="card card-pad" style="max-width:480px;margin-top:16px;">
     <h3 style="margin-bottom:8px;">Data</h3>
     <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:12px;">Everything is stored locally in this browser (IndexedDB) — nothing is sent to a server.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -1476,6 +1642,42 @@ function renderSettings(){
     </div>
   </div>
   `;
+}
+function openBlockForm(editId){
+  const existing = editId ? (state.cache.recurringBlocks||[]).find(b=>b.id===editId) : null;
+  const v = existing || { label:'', weekday:1, time:'', active:true };
+  const body = `
+    <div class="field"><label>Label</label><input id="bLabel" value="${escapeHTML(v.label)}" placeholder="e.g. Team huddle"></div>
+    <div class="field-row">
+      <div class="field"><label>Every</label><select id="bWeekday">${DOW_SHORT.map((d,i)=>`<option value="${i+1}" ${v.weekday===i+1?'selected':''}>${d}</option>`).join('')}</select></div>
+      <div class="field"><label>Time (optional)</label><input type="time" id="bTime" value="${v.time||''}"></div>
+    </div>
+    <div class="field"><label><input type="checkbox" id="bActive" ${v.active?'checked':''} style="width:auto;"> Active</label></div>
+  `;
+  const foot = `
+    ${existing?`<button class="btn btn-danger" id="bDelete">Remove</button>`:`<span></span>`}
+    <div class="modal-foot-right"><button class="btn btn-outline" id="bCancel">Cancel</button><button class="btn" id="bSave">${existing?'Save':'Add'}</button></div>
+  `;
+  showModal(existing?'Edit recurring block':'Add recurring block', body, foot);
+  document.getElementById('bCancel').addEventListener('click', closeModal);
+  document.getElementById('bDelete')?.addEventListener('click', async ()=>{
+    await DB.delete('recurring_blocks', editId);
+    closeModal(); toast('Recurring block removed'); render();
+  });
+  document.getElementById('bSave').addEventListener('click', async ()=>{
+    const label = document.getElementById('bLabel').value.trim();
+    if(!label){ toast('Label is required'); return; }
+    const obj = {
+      label,
+      weekday: Number(document.getElementById('bWeekday').value),
+      time: document.getElementById('bTime').value,
+      active: document.getElementById('bActive').checked,
+      createdAt: existing?.createdAt || new Date().toISOString(),
+    };
+    if(existing) obj.id = existing.id;
+    await DB.put('recurring_blocks', obj);
+    closeModal(); toast(existing?'Recurring block updated':'Recurring block added'); render();
+  });
 }
 function mountSettings(){
   document.getElementById('setSave').addEventListener('click', async ()=>{
@@ -1488,12 +1690,19 @@ function mountSettings(){
     });
     toast('Settings saved'); render();
   });
+  document.getElementById('addBlockBtn').addEventListener('click', ()=>openBlockForm());
+  document.querySelectorAll('[data-edit-block]').forEach(b=>b.addEventListener('click', ()=>openBlockForm(Number(b.dataset.editBlock))));
+  document.querySelectorAll('[data-del-block]').forEach(b=>b.addEventListener('click', async ()=>{
+    await DB.delete('recurring_blocks', Number(b.dataset.delBlock));
+    toast('Recurring block removed'); render();
+  }));
   document.getElementById('exportBtn').addEventListener('click', async ()=>{
     const data = {
       technicians: await DB.getAll('technicians'),
       sites: await DB.getAll('sites'),
       events: await DB.getAll('events'),
       settings: await DB.get('settings','settings'),
+      recurringBlocks: await DB.getAll('recurring_blocks'),
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
@@ -1533,6 +1742,7 @@ function confirmResetAll(){
     await DB.clear('sites');
     await DB.clear('events');
     await DB.clear('settings');
+    await DB.clear('recurring_blocks');
     await seedIfEmpty();
     closeModal(); toast('All data reset');
     state.weekStart = mondayOf(new Date());
