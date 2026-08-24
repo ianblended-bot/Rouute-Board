@@ -636,20 +636,20 @@ async function materializeRecurringBlocks(startISO, endISO){
 
 /* ---------- technician absences (holidays, sick days, etc.) ---------- */
 function getTechAbsenceRanges(technicianId){
-  const dates = state.cache.events
+  const events = state.cache.events
     .filter(e => e.type==='techAbsence' && e.technicianId===technicianId)
-    .map(e => e.date)
-    .sort();
+    .sort((a,b)=>a.date.localeCompare(b.date));
   const ranges = [];
-  for(const d of dates){
+  for(const e of events){
+    const category = e.absenceCategory || 'holiday';
     const last = ranges[ranges.length-1];
-    if(last && isoAddDays(last.end,1)===d) last.end = d;
-    else ranges.push({ start:d, end:d });
+    if(last && last.category===category && isoAddDays(last.end,1)===e.date) last.end = e.date;
+    else ranges.push({ start:e.date, end:e.date, category });
   }
   return ranges;
 }
-async function removeTechAbsenceRange(technicianId, start, end){
-  const toDelete = state.cache.events.filter(e => e.type==='techAbsence' && e.technicianId===technicianId && e.date>=start && e.date<=end);
+async function removeTechAbsenceRange(technicianId, start, end, category){
+  const toDelete = state.cache.events.filter(e => e.type==='techAbsence' && e.technicianId===technicianId && e.date>=start && e.date<=end && (e.absenceCategory||'holiday')===category);
   for(const e of toDelete) await DB.delete('events', e.id);
   await refreshCache();
 }
@@ -660,7 +660,14 @@ function openAbsenceForm(technicianId){
       <div class="field"><label>Start date</label><input type="date" id="absStart" value="${today}"></div>
       <div class="field"><label>End date</label><input type="date" id="absEnd" value="${today}"></div>
     </div>
+    <div class="field"><label>Type</label>
+      <select id="absCategory">
+        <option value="holiday">Holiday / annual leave</option>
+        <option value="absence">Absence (sickness, other unplanned)</option>
+      </select>
+    </div>
     <div class="field"><label>Label (optional)</label><input id="absLabel" placeholder="e.g. Annual leave, sick day…"></div>
+    <div class="freq-hint">Only "Absence" counts toward the Bradford Score in Reports — holidays don't.</div>
   `;
   const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="absCancel">Cancel</button><button class="btn" id="absSave">Add</button></div>`;
   showModal('Add holiday / absence', body, foot);
@@ -669,14 +676,15 @@ function openAbsenceForm(technicianId){
     const start = document.getElementById('absStart').value;
     const end = document.getElementById('absEnd').value;
     const label = document.getElementById('absLabel').value.trim();
+    const category = document.getElementById('absCategory').value;
     if(!start || !end || start > end){ toast('Pick a valid date range'); return; }
     let d = start, guard = 0;
     while(d <= end && guard < 400){
       guard++;
-      await DB.add('events', { date:d, type:'techAbsence', technicianId, siteId:null, time:'', title:label, notes:'', completed: d<=todayISO(), createdAt:new Date().toISOString() });
+      await DB.add('events', { date:d, type:'techAbsence', technicianId, siteId:null, time:'', title:label, notes:'', absenceCategory:category, completed: d<=todayISO(), createdAt:new Date().toISOString() });
       d = isoAddDays(d,1);
     }
-    toast('Absence added');
+    toast(category==='holiday' ? 'Holiday added' : 'Absence added');
     await refreshCache();
     openTechnicianForm(technicianId);
   });
@@ -1235,13 +1243,16 @@ function openTechnicianForm(editId){
   }).join('');
 
   const absenceRanges = existing ? getTechAbsenceRanges(existing.id) : [];
-  const absenceRows = absenceRanges.length ? absenceRanges.map(r=>`
+  const absenceRows = absenceRanges.length ? absenceRanges.map(r=>{
+    const catLabel = r.category==='absence' ? 'Absence' : 'Holiday';
+    const catBadge = r.category==='absence' ? 'badge-overdue' : 'badge-ok';
+    return `
     <div class="watch-row" style="padding:7px 0;">
-      <div class="watch-name" style="font-size:12.5px;font-weight:600;">${r.start===r.end ? humanDate(r.start) : `${humanDateShort(r.start)} – ${humanDate(r.end)}`}</div>
+      <div><span class="badge ${catBadge}" style="margin-right:8px;">${catLabel}</span><span class="watch-name" style="font-size:12.5px;font-weight:600;">${r.start===r.end ? humanDate(r.start) : `${humanDateShort(r.start)} – ${humanDate(r.end)}`}</span></div>
       <div class="watch-spacer"></div>
-      <button class="icon-btn" data-remove-absence="${r.start}|${r.end}">Remove</button>
-    </div>
-  `).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No holidays/absences logged.</p>`;
+      <button class="icon-btn" data-remove-absence="${r.start}|${r.end}|${r.category}">Remove</button>
+    </div>`;
+  }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No holidays/absences logged.</p>`;
 
   const body = `
     <div class="field"><label>Name</label><input id="tName" value="${escapeHTML(v.name)}" placeholder="Full name"></div>
@@ -1275,9 +1286,9 @@ function openTechnicianForm(editId){
   document.getElementById('tDelete')?.addEventListener('click', ()=>{ closeModal(); confirmDeleteTechnician(editId); });
   document.getElementById('tAddAbsence')?.addEventListener('click', ()=>openAbsenceForm(existing.id));
   document.querySelectorAll('[data-remove-absence]').forEach(b=>b.addEventListener('click', async ()=>{
-    const [start,end] = b.dataset.removeAbsence.split('|');
-    await removeTechAbsenceRange(existing.id, start, end);
-    toast('Absence removed');
+    const [start,end,category] = b.dataset.removeAbsence.split('|');
+    await removeTechAbsenceRange(existing.id, start, end, category);
+    toast('Removed');
     openTechnicianForm(existing.id);
   }));
   document.getElementById('tSave').addEventListener('click', async ()=>{
@@ -1708,22 +1719,33 @@ function bradfordBand(score){
   if(score <= 200) return 'Medium';
   return 'High';
 }
+function countSpells(sortedDates){
+  let spells = 0, prev = null;
+  for(const d of sortedDates){
+    if(!prev || isoAddDays(prev,1) !== d) spells++;
+    prev = d;
+  }
+  return spells;
+}
 function buildAbsenceReport(startISO, endISO){
+  // Bradford Score only reflects unplanned absence (sickness, other) — booked holiday/annual
+  // leave is planned and shouldn't count toward it, so the two are tracked separately here.
   const techs = state.cache.technicians.filter(t=>t.active);
   return techs.map(t=>{
-    const dates = state.cache.events
-      .filter(e=>e.type==='techAbsence' && e.technicianId===t.id && e.date>=startISO && e.date<=endISO)
-      .map(e=>e.date)
-      .sort();
-    let spells = 0;
-    let prev = null;
-    for(const d of dates){
-      if(!prev || isoAddDays(prev,1) !== d) spells++;
-      prev = d;
-    }
-    const totalDays = dates.length;
-    const bradford = spells*spells*totalDays;
-    return { Technician: t.name, 'Absence spells': spells, 'Total days': totalDays, 'Bradford Score': bradford, 'Indicative band': bradfordBand(bradford) };
+    const events = state.cache.events.filter(e=>e.type==='techAbsence' && e.technicianId===t.id && e.date>=startISO && e.date<=endISO);
+    const holidayDates = events.filter(e=>(e.absenceCategory||'holiday')!=='absence').map(e=>e.date).sort();
+    const absenceDates = events.filter(e=>e.absenceCategory==='absence').map(e=>e.date).sort();
+    const absenceSpells = countSpells(absenceDates);
+    const absenceDays = absenceDates.length;
+    const bradford = absenceSpells*absenceSpells*absenceDays;
+    return {
+      Technician: t.name,
+      'Holiday days': holidayDates.length,
+      'Absence spells': absenceSpells,
+      'Absence days': absenceDays,
+      'Bradford Score': bradford,
+      'Indicative band': bradfordBand(bradford),
+    };
   }).sort((a,b)=> b['Bradford Score'] - a['Bradford Score']);
 }
 function reportTableHTML(rows, emptyMsg){
@@ -1771,7 +1793,7 @@ function renderReports(){
   <div class="card" style="margin-bottom:18px;">
     <div class="panel-title"><h3>Absences &amp; Bradford Score</h3><button class="icon-btn" id="repExportAbsence">Export CSV</button></div>
     <div class="panel-body" style="padding:6px 14px 14px;">
-      <p style="font-size:12px;color:var(--text-faint);margin:6px 0 12px;">Bradford Score = spells² × total days — weights frequent short absences more heavily than one long one. Bradford Factor is usually assessed over a rolling 12 months; pick a custom range to match your own policy. Bands shown are indicative only, not a legal or company standard — adjust to your own policy.</p>
+      <p style="font-size:12px;color:var(--text-faint);margin:6px 0 12px;">Bradford Score = spells² × days, calculated from <strong>Absence</strong> entries only — booked Holiday time is shown for reference but never counted, since Bradford Factor is meant to measure unplanned absence. Usually assessed over a rolling 12 months; pick a custom range to match your own policy. Bands shown are indicative only, not a legal or company standard — adjust to your own policy.</p>
       ${reportTableHTML(absenceRows, 'No active technicians to report on.')}
     </div>
   </div>
