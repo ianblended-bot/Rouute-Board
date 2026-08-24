@@ -435,7 +435,7 @@ function renderSchedule(){
     const iso = toISO(d);
     const isToday = iso === todayIso;
     const isWeekend = i>=5;
-    const evs = state.cache.events.filter(e=>e.date===iso).sort((a,b)=>(a.time||'').localeCompare(b.time||''));
+    const evs = state.cache.events.filter(e=>e.date===iso && e.type!=='techAbsence').sort((a,b)=>(a.time||'').localeCompare(b.time||''));
     const evHTML = evs.map(e=>eventTagHTML(e)).join('');
     return `
     <div class="day-sheet ${isToday?'is-today':''} ${isWeekend?'is-weekend':''}">
@@ -1700,6 +1700,32 @@ function buildFleetCheckMonthlyReport(startISO, endISO){
     return { Driver: d.name, 'Months in range': months.length, Completed: completed, 'Completion %': months.length ? Math.round(completed/months.length*100)+'%' : '—' };
   });
 }
+function bradfordBand(score){
+  // Common indicative bands used by some UK employers — not a legal standard, and thresholds
+  // vary by company policy. Shown for reference only; adjust to your own policy as needed.
+  if(score === 0) return 'None';
+  if(score <= 50) return 'Low';
+  if(score <= 200) return 'Medium';
+  return 'High';
+}
+function buildAbsenceReport(startISO, endISO){
+  const techs = state.cache.technicians.filter(t=>t.active);
+  return techs.map(t=>{
+    const dates = state.cache.events
+      .filter(e=>e.type==='techAbsence' && e.technicianId===t.id && e.date>=startISO && e.date<=endISO)
+      .map(e=>e.date)
+      .sort();
+    let spells = 0;
+    let prev = null;
+    for(const d of dates){
+      if(!prev || isoAddDays(prev,1) !== d) spells++;
+      prev = d;
+    }
+    const totalDays = dates.length;
+    const bradford = spells*spells*totalDays;
+    return { Technician: t.name, 'Absence spells': spells, 'Total days': totalDays, 'Bradford Score': bradford, 'Indicative band': bradfordBand(bradford) };
+  }).sort((a,b)=> b['Bradford Score'] - a['Bradford Score']);
+}
 function reportTableHTML(rows, emptyMsg){
   if(!rows.length) return `<p style="font-size:12.5px;color:var(--text-faint);padding:12px 0;">${emptyMsg}</p>`;
   const headers = Object.keys(rows[0]);
@@ -1725,6 +1751,7 @@ function renderReports(){
   const huddleRows = buildHuddleAttendanceReport(startISO, endISO);
   const dailyRows = buildFleetCheckDailyReport(startISO, endISO);
   const monthlyRows = buildFleetCheckMonthlyReport(startISO, endISO);
+  const absenceRows = buildAbsenceReport(startISO, endISO);
 
   return `
   <div class="view-head">
@@ -1740,6 +1767,13 @@ function renderReports(){
   <div class="field-row" id="repCustomRange" style="display:${range==='custom'?'flex':'none'};max-width:420px;margin-bottom:18px;">
     <div class="field"><label>Start</label><input type="date" id="repStart" value="${startISO}"></div>
     <div class="field"><label>End</label><input type="date" id="repEnd" value="${endISO}"></div>
+  </div>
+  <div class="card" style="margin-bottom:18px;">
+    <div class="panel-title"><h3>Absences &amp; Bradford Score</h3><button class="icon-btn" id="repExportAbsence">Export CSV</button></div>
+    <div class="panel-body" style="padding:6px 14px 14px;">
+      <p style="font-size:12px;color:var(--text-faint);margin:6px 0 12px;">Bradford Score = spells² × total days — weights frequent short absences more heavily than one long one. Bradford Factor is usually assessed over a rolling 12 months; pick a custom range to match your own policy. Bands shown are indicative only, not a legal or company standard — adjust to your own policy.</p>
+      ${reportTableHTML(absenceRows, 'No active technicians to report on.')}
+    </div>
   </div>
   <div class="card" style="margin-bottom:18px;">
     <div class="panel-title"><h3>Huddle attendance</h3><button class="icon-btn" id="repExportHuddle">Export CSV</button></div>
@@ -1760,6 +1794,11 @@ function mountReports(){
   document.getElementById('repStart')?.addEventListener('change', (e)=>{ state.reportsCustomStart = e.target.value; render(); });
   document.getElementById('repEnd')?.addEventListener('change', (e)=>{ state.reportsCustomEnd = e.target.value; render(); });
   const { startISO, endISO } = reportsRangeISO();
+  document.getElementById('repExportAbsence')?.addEventListener('click', ()=>{
+    const rows = buildAbsenceReport(startISO, endISO);
+    if(!rows.length){ toast('Nothing to export'); return; }
+    exportCSV(rows, `absences-bradford-score_${startISO}_to_${endISO}`);
+  });
   document.getElementById('repExportHuddle')?.addEventListener('click', ()=>{
     const rows = buildHuddleAttendanceReport(startISO, endISO);
     if(!rows.length){ toast('Nothing to export'); return; }
