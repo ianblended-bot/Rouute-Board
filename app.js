@@ -255,7 +255,26 @@ function renderDashboard(){
   const unreviewedHuddles = state.cache.events
     .filter(e=> e.type==='block' && e.date<=todayISO() && !state.cache.huddleAttendance.some(a=>a.eventId===e.id))
     .sort((a,b)=> a.date.localeCompare(b.date));
-  const outstandingCount = missedEvents.length + unreviewedHuddles.length;
+
+  // FleetCheck: nudge about TODAY's daily checks and THIS MONTH's monthly checks only —
+  // unlike visits/huddles, these are rolling admin tasks rather than dated occurrences, so we
+  // don't want a growing backlog of every missed day piling up here.
+  const todayStr = todayISO();
+  const monthStr = todayStr.slice(0,7);
+  const drivers = state.cache.technicians.filter(t=>t.isDriver && t.active);
+  const todayIsoDow = (()=>{ const d = new Date().getDay(); return d===0?7:d; })();
+  const driversNeedingDaily = drivers.filter(d=>{
+    const workDays = (d.workDays && d.workDays.length) ? d.workDays : [1,2,3,4,5];
+    if(!workDays.includes(todayIsoDow)) return false;
+    const onLeave = state.cache.events.some(e=>e.type==='techAbsence' && e.technicianId===d.id && e.date===todayStr);
+    if(onLeave) return false;
+    return !state.cache.fleetcheckRecords.some(r=>r.technicianId===d.id && r.checkType==='daily' && r.period===todayStr);
+  });
+  const driversNeedingMonthly = drivers.filter(d=>
+    !state.cache.fleetcheckRecords.some(r=>r.technicianId===d.id && r.checkType==='monthly' && r.period===monthStr)
+  );
+
+  const outstandingCount = missedEvents.length + unreviewedHuddles.length + driversNeedingDaily.length + driversNeedingMonthly.length;
   const outstandingRows = missedEvents.slice(0,8).map(e=>{
     const t = EVENT_TYPES[e.type] || EVENT_TYPES.other;
     const who = e.technicianId ? techName(e.technicianId) : null;
@@ -272,7 +291,18 @@ function renderDashboard(){
       <div class="watch-spacer"></div>
       <button class="icon-btn" data-mark-attendance="${e.id}">Mark attendance</button>
     </div>`;
-  }).join('') + (outstandingCount>8 ? `<div style="padding:10px 12px;"><a href="#search" data-goto-missed="1" style="font-size:12px;color:var(--forest-dim);font-weight:600;">View all ${outstandingCount} outstanding →</a></div>` : '');
+  }).join('')
+    + (driversNeedingDaily.length ? `<div class="watch-row">
+      <div><div class="watch-name">Daily FleetCheck</div><div class="watch-meta">${driversNeedingDaily.length} driver${driversNeedingDaily.length===1?'':'s'} still need today's check · ${driversNeedingDaily.map(d=>escapeHTML(d.name)).join(', ')}</div></div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-goto-fleetcheck="daily">Go to FleetCheck</button>
+    </div>` : '')
+    + (driversNeedingMonthly.length ? `<div class="watch-row">
+      <div><div class="watch-name">Monthly FleetCheck</div><div class="watch-meta">${driversNeedingMonthly.length} driver${driversNeedingMonthly.length===1?'':'s'} still need this month's check · ${driversNeedingMonthly.map(d=>escapeHTML(d.name)).join(', ')}</div></div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-goto-fleetcheck="monthly">Go to FleetCheck</button>
+    </div>` : '')
+    + (missedEvents.length+unreviewedHuddles.length>8 ? `<div style="padding:10px 12px;"><a href="#search" data-goto-missed="1" style="font-size:12px;color:var(--forest-dim);font-weight:600;">View all ${missedEvents.length+unreviewedHuddles.length} outstanding visits/huddles →</a></div>` : '');
   const outstandingHTML = outstandingCount ? outstandingRows : `<div class="empty" style="padding:22px;"><p>Nothing outstanding — everything logged is confirmed done.</p></div>`;
 
   return `
@@ -378,6 +408,12 @@ function mountDashboard(){
   document.querySelectorAll('[data-mark-attendance]').forEach(b=>b.addEventListener('click', (e)=>{
     e.stopPropagation();
     openEventForm(null, Number(b.dataset.markAttendance));
+  }));
+  document.querySelectorAll('[data-goto-fleetcheck]').forEach(b=>b.addEventListener('click', ()=>{
+    state.fleetCheckTab = b.dataset.gotoFleetcheck;
+    state.fleetCheckDate = new Date();
+    state.fleetCheckMonth = new Date();
+    navigate('fleetcheck');
   }));
   document.querySelector('[data-goto-missed]')?.addEventListener('click', (e)=>{
     e.preventDefault();
