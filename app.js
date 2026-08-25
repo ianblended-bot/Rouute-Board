@@ -53,18 +53,20 @@ const state = {
   fleetCheckDate: new Date(),
   fleetCheckMonth: new Date(),
   reportsRange: 'month',
-  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[] },
+  todoFilter: 'open',
+  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[] },
 };
 
 async function refreshCache(){
-  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords] = await Promise.all([
-    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records')
+  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos] = await Promise.all([
+    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos')
   ]);
   technicians.sort((a,b)=>a.name.localeCompare(b.name));
   sites.sort((a,b)=>a.name.localeCompare(b.name));
   events.sort((a,b)=>a.date.localeCompare(b.date));
   recurringBlocks.sort((a,b)=>a.weekday-b.weekday);
-  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords };
+  todos.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)); // newest first
+  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos };
 }
 
 /* ---------------- status / KPI computation ---------------- */
@@ -171,7 +173,7 @@ function showModal(titleHTML, bodyHTML, footHTML, opts){
 function closeModal(){ document.getElementById('modalBackdrop').hidden = true; }
 
 /* ---------------- routing ---------------- */
-const ROUTE_TITLES = { dashboard:'Dashboard', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', reports:'Reports', search:'Search', settings:'Settings' };
+const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', reports:'Reports', search:'Search', settings:'Settings' };
 
 function navigate(route){
   state.route = route;
@@ -191,6 +193,7 @@ async function render(){
   }
   switch(state.route){
     case 'dashboard': main.innerHTML = renderDashboard(); mountDashboard(); break;
+    case 'todos': main.innerHTML = renderTodos(); mountTodos(); break;
     case 'schedule': main.innerHTML = renderSchedule(); mountSchedule(); break;
     case 'technicians': main.innerHTML = renderTechnicians(); mountTechnicians(); break;
     case 'sites': main.innerHTML = renderSites(); mountSites(); break;
@@ -305,6 +308,17 @@ function renderDashboard(){
     + (missedEvents.length+unreviewedHuddles.length>8 ? `<div style="padding:10px 12px;"><a href="#search" data-goto-missed="1" style="font-size:12px;color:var(--forest-dim);font-weight:600;">View all ${missedEvents.length+unreviewedHuddles.length} outstanding visits/huddles →</a></div>` : '');
   const outstandingHTML = outstandingCount ? outstandingRows : `<div class="empty" style="padding:22px;"><p>Nothing outstanding — everything logged is confirmed done.</p></div>`;
 
+  const dueTodos = state.cache.todos.filter(t=>!t.completed && (
+    (t.dueDate && t.dueDate<=todayISO()) || (t.alertAt && new Date(t.alertAt)<=new Date())
+  )).sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
+  const todoRowsHTML = dueTodos.length ? dueTodos.slice(0,6).map(t=>`
+    <div class="watch-row">
+      <button class="et-check" data-toggle-todo="${t.id}" title="Mark done">✓</button>
+      <div><div class="watch-name">${escapeHTML(t.text)}</div><div class="watch-meta">${todoDueBadge(t)||''}${t.alertAt?' ⏰':''}</div></div>
+    </div>
+  `).join('') + `<div style="padding:8px 12px 4px;"><button class="btn btn-outline btn-small" data-goto-todos="1">Open To-Do${dueTodos.length>6?` (${dueTodos.length})`:''}</button></div>`
+    : `<div class="empty" style="padding:22px;"><p>Nothing due — <button class="icon-btn" data-goto-todos="1" style="display:inline;">open To-Do</button> to add a task.</p></div>`;
+
   return `
   <div class="view-head">
     <div>
@@ -346,6 +360,11 @@ function renderDashboard(){
       <div class="kpi-note">${overdueTech.filter(x=>x.oo.state==='overdue').length} technician(s) overdue a 1-1 overall</div>
     </div>
     <div class="card kpi-card">
+      <div class="kpi-label">To-Do due</div>
+      <div class="kpi-value" style="color:${dueTodos.length?'var(--clay)':'var(--ink)'}">${dueTodos.length}</div>
+      <div class="kpi-note">Open tasks due today or earlier</div>
+    </div>
+    <div class="card kpi-card">
       <div class="kpi-label">Outstanding</div>
       <div class="kpi-value" style="color:${outstandingCount?'var(--clay)':'var(--ink)'}">${outstandingCount}</div>
       <div class="kpi-note">Visits not confirmed done · huddles not reviewed</div>
@@ -359,6 +378,10 @@ function renderDashboard(){
 
   <div class="dash-grid">
     <div>
+      <div class="card" style="margin-bottom:16px;">
+        <div class="panel-title"><h3>To-Do</h3></div>
+        <div class="panel-body">${todoRowsHTML}</div>
+      </div>
       <div class="card" style="margin-bottom:16px;">
         <div class="panel-title"><h3>Outstanding — needs confirming</h3></div>
         <div class="panel-body">${outstandingHTML}</div>
@@ -414,6 +437,14 @@ function mountDashboard(){
     state.fleetCheckDate = new Date();
     state.fleetCheckMonth = new Date();
     navigate('fleetcheck');
+  }));
+  document.querySelectorAll('[data-goto-todos]').forEach(b=>b.addEventListener('click', ()=>navigate('todos')));
+  document.querySelectorAll('[data-toggle-todo]').forEach(b=>b.addEventListener('click', async (e)=>{
+    e.stopPropagation();
+    const t = state.cache.todos.find(x=>x.id===Number(b.dataset.toggleTodo));
+    if(!t) return;
+    await DB.put('todos', { ...t, completed: !t.completed });
+    render();
   }));
   document.querySelector('[data-goto-missed]')?.addEventListener('click', (e)=>{
     e.preventDefault();
@@ -1098,21 +1129,25 @@ async function exportXLSX(rows, filename){
   toast('Excel file exported');
 }
 
-async function exportPDF(rows, filename, startISO, endISO){
+async function exportPDF(rows, filename, startISO, endISO, opts){
   try{
     await loadScriptOnce(EXPORT_LIBS.jspdf);
     await loadScriptOnce(EXPORT_LIBS.jspdfAutotable);
   } catch(e){ toast('Could not load the PDF export library — check your connection'); return; }
-  const doc = new jspdf.jsPDF({ orientation:'landscape' });
+  const title = opts?.title || 'Route Board — Schedule Export';
+  const subtitle = opts?.subtitle || `${humanDate(startISO)} to ${humanDate(endISO)}`;
+  const headers = opts?.headers || ['Date','Day','Type','Technician','Site','Time','Status','Notes'];
+  const bodyRows = opts?.bodyRows || rows.map(r => [r.Date, r.Day, r.Type, r.Technician, r.Site, r.Time, r.Status, r.Notes]);
+  const doc = new jspdf.jsPDF({ orientation: opts?.orientation || 'landscape' });
   doc.setFontSize(14);
-  doc.text('Route Board — Schedule Export', 14, 15);
+  doc.text(title, 14, 15);
   doc.setFontSize(10);
   doc.setTextColor(110,110,100);
-  doc.text(`${humanDate(startISO)} to ${humanDate(endISO)}`, 14, 21);
+  doc.text(subtitle, 14, 21);
   doc.autoTable({
     startY: 26,
-    head: [['Date','Day','Type','Technician','Site','Time','Status','Notes']],
-    body: rows.map(r => [r.Date, r.Day, r.Type, r.Technician, r.Site, r.Time, r.Status, r.Notes]),
+    head: [headers],
+    body: bodyRows,
     styles: { fontSize: 8, cellPadding: 3 },
     headStyles: { fillColor: [31,75,63] },
     alternateRowStyles: { fillColor: [246,244,237] },
@@ -1838,6 +1873,257 @@ function mountReports(){
   });
 }
 
+/* ================= TO-DO LIST ================= */
+function getFilteredTodos(filter){
+  const f = filter || state.todoFilter;
+  let list = state.cache.todos;
+  if(f==='open') list = list.filter(t=>!t.completed);
+  else if(f==='completed') list = list.filter(t=>t.completed);
+  return list; // already sorted newest-first in refreshCache
+}
+function todoDueBadge(t){
+  if(!t.dueDate) return '';
+  const today = todayISO();
+  if(t.completed) return `<span class="badge badge-neutral">${humanDateShort(t.dueDate)}</span>`;
+  if(t.dueDate < today) return `<span class="badge badge-overdue">Overdue · ${humanDateShort(t.dueDate)}</span>`;
+  if(t.dueDate === today) return `<span class="badge badge-due">Due today</span>`;
+  return `<span class="badge badge-scheduled">Due ${humanDateShort(t.dueDate)}</span>`;
+}
+function todoAlertBadge(t){
+  if(!t.alertAt) return '';
+  const alertDate = new Date(t.alertAt);
+  const passed = alertDate <= new Date();
+  const label = alertDate.toLocaleString('en-GB', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' });
+  if(t.completed) return `<span class="badge badge-neutral">⏰ ${label}</span>`;
+  return passed ? `<span class="badge badge-overdue">⏰ Alert passed · ${label}</span>` : `<span class="badge badge-neutral">⏰ ${label}</span>`;
+}
+function todoSourceBadge(t){
+  if(!t.source || t.source==='manual') return '';
+  return `<span class="badge badge-scheduled">${escapeHTML(t.source)}</span>`;
+}
+function renderTodos(){
+  const list = getFilteredTodos();
+  const allTodos = state.cache.todos;
+  const openCount = allTodos.filter(t=>!t.completed).length;
+  const overdueCount = allTodos.filter(t=>!t.completed && t.dueDate && t.dueDate < todayISO()).length;
+
+  const rows = list.map(t=>`
+    <div class="todo-row ${t.completed?'is-done':''}">
+      <button class="et-check ${t.completed?'is-done':''}" data-toggle-todo="${t.id}" title="${t.completed?'Mark not done':'Mark done'}">✓</button>
+      <div class="todo-body">
+        <div class="todo-text">${escapeHTML(t.text)}</div>
+        <div class="todo-meta">${todoDueBadge(t)}${todoAlertBadge(t)}${todoSourceBadge(t)}</div>
+      </div>
+      <div class="row-actions">
+        ${!t.completed ? `<button class="icon-btn" data-rollover-todo="${t.id}">Move to…</button>` : ''}
+        <button class="icon-btn" data-edit-todo="${t.id}">Edit</button>
+        <button class="icon-btn" data-del-todo="${t.id}">Delete</button>
+      </div>
+    </div>
+  `).join('');
+
+  const filters = [['all','All'],['open','Open'],['completed','Completed']].map(([f,label])=>
+    `<button class="chip ${state.todoFilter===f?'active':''}" data-todo-filter="${f}">${label}</button>`).join('');
+
+  const notifStatus = ('Notification' in window) ? Notification.permission : 'unsupported';
+  const notifLabel = notifStatus==='granted' ? '🔔 Alerts on' : notifStatus==='denied' ? 'Alerts blocked' : '🔔 Enable alerts';
+
+  return `
+  <div class="view-head">
+    <div><h1>To-Do</h1><div class="view-sub">${openCount} open task${openCount===1?'':'s'}</div></div>
+    <div class="view-actions">
+      <button class="btn btn-outline" id="todoNotifBtn" ${notifStatus==='denied'||notifStatus==='unsupported'?'disabled':''}>${notifLabel}</button>
+      <button class="btn btn-outline" id="todoExportBtn">⬇ Export</button>
+    </div>
+  </div>
+  ${overdueCount ? `
+  <div class="todo-banner">
+    <span>⚠ ${overdueCount} overdue task${overdueCount===1?'':'s'}</span>
+    <button class="btn btn-outline" id="todoRolloverAllTomorrow">Roll all to tomorrow</button>
+    <button class="btn btn-outline" id="todoRolloverAllPick">Pick a date…</button>
+  </div>` : ''}
+  <div class="todo-add-row">
+    <input type="text" id="todoQuickAdd" placeholder="Add a task and press Enter…">
+    <button class="btn" id="todoQuickAddBtn">+ Add</button>
+    <button class="btn btn-outline" id="todoFullAddBtn">+ Details…</button>
+  </div>
+  <div class="toolbar"><div class="chip-filter">${filters}</div></div>
+  ${list.length ? `<div class="card" style="padding:4px 8px;">${rows}</div>` : `<div class="card empty"><h3>Nothing here</h3><p>${state.todoFilter==='completed'?'No completed tasks yet.':'Add a task above to get started.'}</p></div>`}
+  `;
+}
+function mountTodos(){
+  document.querySelectorAll('[data-todo-filter]').forEach(b=>b.addEventListener('click', ()=>{ state.todoFilter=b.dataset.todoFilter; render(); }));
+
+  const quickAdd = document.getElementById('todoQuickAdd');
+  async function quickAddTodo(){
+    const text = quickAdd.value.trim();
+    if(!text) return;
+    await DB.add('todos', { text, completed:false, dueDate: todayISO(), alertAt:null, alertFired:false, source:'manual', sourceRef:null, createdAt:new Date().toISOString() });
+    render();
+  }
+  document.getElementById('todoQuickAddBtn').addEventListener('click', quickAddTodo);
+  quickAdd.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); quickAddTodo(); } });
+  document.getElementById('todoFullAddBtn').addEventListener('click', ()=>openTodoForm());
+
+  document.querySelectorAll('[data-toggle-todo]').forEach(b=>b.addEventListener('click', async ()=>{
+    const t = state.cache.todos.find(x=>x.id===Number(b.dataset.toggleTodo));
+    if(!t) return;
+    await DB.put('todos', { ...t, completed: !t.completed });
+    render();
+  }));
+  document.querySelectorAll('[data-edit-todo]').forEach(b=>b.addEventListener('click', ()=>openTodoForm(Number(b.dataset.editTodo))));
+  document.querySelectorAll('[data-del-todo]').forEach(b=>b.addEventListener('click', async ()=>{
+    await DB.delete('todos', Number(b.dataset.delTodo));
+    toast('Task deleted'); render();
+  }));
+  document.querySelectorAll('[data-rollover-todo]').forEach(b=>b.addEventListener('click', ()=>openRolloverModal([Number(b.dataset.rolloverTodo)])));
+
+  document.getElementById('todoRolloverAllTomorrow')?.addEventListener('click', async ()=>{
+    await bulkRolloverTodos(isoAddDays(todayISO(),1));
+    toast('Overdue tasks moved to tomorrow'); render();
+  });
+  document.getElementById('todoRolloverAllPick')?.addEventListener('click', ()=>{
+    const overdueIds = state.cache.todos.filter(t=>!t.completed && t.dueDate && t.dueDate<todayISO()).map(t=>t.id);
+    openRolloverModal(overdueIds);
+  });
+
+  document.getElementById('todoNotifBtn')?.addEventListener('click', async ()=>{
+    const granted = await requestNotificationPermission();
+    toast(granted ? 'Browser alerts enabled' : 'Alerts not enabled');
+    render();
+  });
+  document.getElementById('todoExportBtn').addEventListener('click', ()=>openTodoExportModal());
+}
+function openTodoForm(editId){
+  const existing = editId ? state.cache.todos.find(t=>t.id===editId) : null;
+  const v = existing || { text:'', dueDate: todayISO(), alertAt:null, completed:false };
+  const alertLocal = v.alertAt ? new Date(v.alertAt) : null;
+  const alertDateVal = alertLocal ? toISO(alertLocal) : '';
+  const alertTimeVal = alertLocal ? `${String(alertLocal.getHours()).padStart(2,'0')}:${String(alertLocal.getMinutes()).padStart(2,'0')}` : '';
+
+  const body = `
+    <div class="field"><label>Task</label><textarea id="tdText" placeholder="What needs doing?">${escapeHTML(v.text)}</textarea></div>
+    <div class="field"><label>Due date (optional)</label><input type="date" id="tdDue" value="${v.dueDate||''}"></div>
+    <div class="field-row">
+      <div class="field"><label>Alert date (optional)</label><input type="date" id="tdAlertDate" value="${alertDateVal}"></div>
+      <div class="field"><label>Alert time</label><input type="time" id="tdAlertTime" value="${alertTimeVal}"></div>
+    </div>
+    <div class="freq-hint">Alerts highlight the task here, and fire a browser notification if you've enabled them — but only while Route Board is open in a tab.</div>
+    ${existing ? `<div class="field"><label><input type="checkbox" id="tdCompleted" ${v.completed?'checked':''} style="width:auto;"> Completed</label></div>` : ''}
+  `;
+  const foot = `
+    ${existing ? `<button class="btn btn-danger" id="tdDelete">Delete</button>` : `<span></span>`}
+    <div class="modal-foot-right"><button class="btn btn-outline" id="tdCancel">Cancel</button><button class="btn" id="tdSave">${existing?'Save':'Add task'}</button></div>
+  `;
+  showModal(existing?'Edit task':'New task', body, foot);
+  document.getElementById('tdCancel').addEventListener('click', closeModal);
+  document.getElementById('tdDelete')?.addEventListener('click', async ()=>{
+    await DB.delete('todos', editId);
+    closeModal(); toast('Task deleted'); render();
+  });
+  document.getElementById('tdSave').addEventListener('click', async ()=>{
+    const text = document.getElementById('tdText').value.trim();
+    if(!text){ toast('Enter a task'); return; }
+    const dueDate = document.getElementById('tdDue').value || null;
+    const alertDate = document.getElementById('tdAlertDate').value;
+    const alertTime = document.getElementById('tdAlertTime').value || '09:00';
+    const alertAt = alertDate ? new Date(`${alertDate}T${alertTime}:00`).toISOString() : null;
+    const obj = {
+      text,
+      dueDate,
+      alertAt,
+      alertFired: (existing && existing.alertAt===alertAt) ? existing.alertFired : false, // reset if the alert time changed
+      completed: existing ? document.getElementById('tdCompleted').checked : false,
+      source: existing?.source || 'manual',
+      sourceRef: existing?.sourceRef || null,
+      createdAt: existing?.createdAt || new Date().toISOString(),
+    };
+    if(existing) obj.id = existing.id;
+    await DB.put('todos', obj);
+    closeModal(); toast(existing?'Task updated':'Task added'); render();
+  });
+}
+function openRolloverModal(todoIds){
+  if(!todoIds.length){ toast('Nothing to move'); return; }
+  const tomorrow = isoAddDays(todayISO(),1);
+  const body = `
+    <p style="font-size:13px;margin-bottom:12px;">Move ${todoIds.length} task${todoIds.length===1?'':'s'} to a new date.</p>
+    <div class="field"><label>New date</label><input type="date" id="rolloverDate" value="${tomorrow}"></div>
+  `;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="rolloverCancel">Cancel</button><button class="btn" id="rolloverConfirm">Move</button></div>`;
+  showModal(todoIds.length>1?'Move tasks':'Move task', body, foot);
+  document.getElementById('rolloverCancel').addEventListener('click', closeModal);
+  document.getElementById('rolloverConfirm').addEventListener('click', async ()=>{
+    const newDate = document.getElementById('rolloverDate').value;
+    if(!newDate){ toast('Pick a date'); return; }
+    await bulkRolloverTodos(newDate, todoIds);
+    closeModal(); toast(`Moved to ${humanDate(newDate)}`); render();
+  });
+}
+async function bulkRolloverTodos(newDate, ids){
+  const targets = ids
+    ? state.cache.todos.filter(t=>ids.includes(t.id))
+    : state.cache.todos.filter(t=>!t.completed && t.dueDate && t.dueDate<todayISO());
+  for(const t of targets){
+    await DB.put('todos', { ...t, dueDate:newDate });
+  }
+  await refreshCache();
+}
+function buildTodoExportRows(){
+  return getFilteredTodos().map(t=>({
+    Task: t.text,
+    Due: t.dueDate || '',
+    Alert: t.alertAt ? new Date(t.alertAt).toLocaleString('en-GB') : '',
+    Completed: t.completed ? 'Yes' : 'No',
+    Created: new Date(t.createdAt).toLocaleString('en-GB'),
+  }));
+}
+function openTodoExportModal(){
+  const body = `<div class="field"><label>Format</label><select id="todoExFormat"><option value="csv">CSV (.csv)</option><option value="xlsx">Excel (.xlsx)</option><option value="pdf">PDF (.pdf)</option></select></div>`;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="todoExCancel">Cancel</button><button class="btn" id="todoExRun">Export</button></div>`;
+  showModal('Export to-do list', body, foot);
+  document.getElementById('todoExCancel').addEventListener('click', closeModal);
+  document.getElementById('todoExRun').addEventListener('click', async ()=>{
+    const format = document.getElementById('todoExFormat').value;
+    const rows = buildTodoExportRows();
+    if(!rows.length){ toast('Nothing to export'); return; }
+    const filename = `todo-list_${todayISO()}`;
+    if(format==='csv') exportCSV(rows, filename);
+    else if(format==='xlsx') await exportXLSX(rows, filename);
+    else await exportPDF(rows, filename, null, null, {
+      title: 'Route Board — To-Do List',
+      subtitle: `Exported ${humanDate(todayISO())}`,
+      headers: ['Task','Due','Alert','Completed','Created'],
+      bodyRows: rows.map(r=>[r.Task, r.Due, r.Alert, r.Completed, r.Created]),
+      orientation: 'portrait',
+    });
+    closeModal();
+  });
+}
+/* ---------- alerts (foreground-only; needs the tab open) ---------- */
+async function requestNotificationPermission(){
+  if(!('Notification' in window)) return false;
+  if(Notification.permission==='granted') return true;
+  if(Notification.permission==='denied') return false;
+  try{ return (await Notification.requestPermission())==='granted'; }
+  catch(e){ return false; }
+}
+async function checkTodoAlerts(){
+  if(!state.cache.todos || !state.cache.todos.length) return;
+  const now = new Date();
+  const due = state.cache.todos.filter(t=>!t.completed && t.alertAt && !t.alertFired && new Date(t.alertAt) <= now);
+  if(!due.length) return;
+  for(const t of due){
+    if('Notification' in window && Notification.permission==='granted'){
+      try{ new Notification('Route Board reminder', { body: t.text }); } catch(e){}
+    }
+    await DB.put('todos', { ...t, alertFired:true });
+  }
+  await refreshCache();
+  const modalOpen = !document.getElementById('modalBackdrop')?.hidden;
+  if(!modalOpen && (state.route==='dashboard' || state.route==='todos')) render();
+}
+
 /* ================= SEARCH ================= */
 const EVENT_TYPE_FILTERS = [['all','All types'],['techVisit','Tech visits'],['qaVisit','QA visits'],['oneOnOne','1-1s'],['wfh','WFH'],['leave','Leave'],['other','Other']];
 const TIME_FILTERS = [['all','All time'],['week','This week'],['month','This month'],['missed','Missed / unconfirmed'],['upcoming','Upcoming']];
@@ -2290,6 +2576,10 @@ async function startApp(){
   if('serviceWorker' in navigator){
     navigator.serviceWorker.register('sw.js').catch(()=>{ /* offline caching optional */ });
   }
+
+  // to-do alerts: only fire while this tab is open — check now, then every minute
+  setTimeout(checkTodoAlerts, 3000);
+  setInterval(checkTodoAlerts, 60000);
 }
 
 async function boot(){
