@@ -22,13 +22,19 @@ function humanDateShort(iso){
 }
 function monthLabel(d){ return d.toLocaleString('en-GB',{month:'long', year:'numeric'}); }
 
-/* ---------------- region metadata ---------------- */
-const REGIONS = {
-  east:     { label:'East · North bank', badge:'badge-east' },
-  west:     { label:'West · South bank', badge:'badge-west' },
-  floating: { label:'Floating / exterior', badge:'badge-floating' },
-  outside:  { label:'Outside London', badge:'badge-outside' },
-};
+/* ---------------- zone metadata (dynamic — see Settings > Technician zones) ---------------- */
+const UNZONED = { key:'', label:'Unzoned', color:'#9A9689', soloRequired:false };
+function zoneList(){ return state.cache.zones || []; }
+function zoneByKey(key){
+  if(!key) return UNZONED;
+  return zoneList().find(z=>z.key===key) || UNZONED;
+}
+function renderZoneKeySidebar(){
+  const el = document.getElementById('zoneKeyList');
+  if(!el) return;
+  el.innerHTML = zoneList().map(z=>`<div class="river-key-row"><span class="dot" style="background:${z.color};"></span>${escapeHTML(z.label)}</div>`).join('')
+    || `<div class="river-key-row" style="color:#8A8578;">No zones yet</div>`;
+}
 const EVENT_TYPES = {
   techVisit:   { label:'Tech visit', short:'Tech visit' },
   qaVisit:     { label:'QA visit', short:'QA visit' },
@@ -54,19 +60,20 @@ const state = {
   fleetCheckMonth: new Date(),
   reportsRange: 'month',
   todoFilter: 'open',
-  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[] },
+  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[] },
 };
 
 async function refreshCache(){
-  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos] = await Promise.all([
-    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos')
+  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones] = await Promise.all([
+    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones')
   ]);
   technicians.sort((a,b)=>a.name.localeCompare(b.name));
   sites.sort((a,b)=>a.name.localeCompare(b.name));
   events.sort((a,b)=>a.date.localeCompare(b.date));
   recurringBlocks.sort((a,b)=>a.weekday-b.weekday);
   todos.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)); // newest first
-  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos };
+  zones.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
+  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones };
 }
 
 /* ---------------- status / KPI computation ---------------- */
@@ -145,7 +152,10 @@ function weeklyKPI(weekStartDate){
 /* ---------------- generic helpers ---------------- */
 function techName(id){ const t = state.cache.technicians.find(x=>x.id===id); return t? t.name : null; }
 function siteName(id){ const s = state.cache.sites.find(x=>x.id===id); return s? s.name : null; }
-function regionBadge(region){ const r = REGIONS[region]; return r ? `<span class="badge ${r.badge}">${r.label}</span>` : ''; }
+function regionBadge(region){
+  const z = zoneByKey(region);
+  return `<span class="badge" style="background:color-mix(in srgb, ${z.color} 18%, white); color:${z.color};">${escapeHTML(z.label)}</span>`;
+}
 function escapeHTML(s){ return (s??'').toString().replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 function toast(msg){
@@ -187,6 +197,7 @@ function navigate(route){
 async function render(){
   const main = document.getElementById('main');
   await refreshCache();
+  renderZoneKeySidebar();
   if(state.route === 'schedule' || state.route === 'dashboard'){
     const created = await materializeRecurringBlocks(toISO(state.weekStart), toISO(addDays(state.weekStart,6)));
     if(created) await refreshCache();
@@ -401,15 +412,15 @@ function renderDashboard(){
         <div class="panel-body">${dueSoonTechRows}${dueSoonSiteRows}</div>
       </div>
       <div class="card">
-        <div class="panel-title"><h3>Thames key</h3></div>
+        <div class="panel-title"><h3>Zone key</h3></div>
         <div class="panel-body" style="padding:14px 18px;">
           <p style="font-size:12.5px;color:var(--text-dim);line-height:1.7;">
-            Technicians are grouped by where their sites sit relative to the river, so you can plan
-            back-to-back visits without crossing town.<br><br>
-            <span class="badge badge-east">East · North bank</span> Adien · Finlay · Katherine · Larisa · Remi<br><br>
-            <span class="badge badge-west">West · South bank</span> Carlos · James<br><br>
-            <span class="badge badge-floating">Floating</span> Ella — covers all London zones<br><br>
-            <span class="badge badge-outside">Outside London</span> Helen · Kathryn · Marie
+            Technicians are grouped by zone, so you can plan back-to-back visits without crossing town.
+            Edit your zones any time in Settings.<br><br>
+            ${zoneList().map(z=>{
+              const members = state.cache.technicians.filter(t=>t.active && t.region===z.key).map(t=>escapeHTML(t.name.split(' ')[0])).join(' · ');
+              return `${regionBadge(z.key)} ${members || '<span style="color:var(--text-faint);">No technicians yet</span>'}<br><br>`;
+            }).join('')}
           </p>
         </div>
       </div>
@@ -820,7 +831,7 @@ async function generateSchedule({ startISO, weeks, overwrite }){
     const dm = dayMap[e.date]; if(!dm) return;
     if(e.type==='techVisit'){
       dm.techCount++; if(e.technicianId) dm.techIds.add(e.technicianId);
-      if(techById[e.technicianId]?.region==='outside') dm.soloLock = true;
+      if(zoneByKey(techById[e.technicianId]?.region).soloRequired) dm.soloLock = true;
       dm.kind = 'tech';
       const wk = isoToWeek[e.date]; if(wk!=null) weeklyTechCount[wk] = (weeklyTechCount[wk]||0)+1;
     }
@@ -859,7 +870,7 @@ async function generateSchedule({ startISO, weeks, overwrite }){
       if(dm.kind==='qa') return false; // keep tech-visit days separate from QA-visit days
       if(dm.soloLock) return false;
       const tech = techById[extra.technicianId];
-      const isOutside = tech && tech.region==='outside';
+      const isOutside = zoneByKey(tech?.region).soloRequired;
       if(!isTechAvailable(tech, iso)) return false;
       if(isOutside){ if(dm.techCount>0) return false; }
       else if(dm.techCount>=MAX_TECH_PER_DAY) return false;
@@ -879,7 +890,7 @@ async function generateSchedule({ startISO, weeks, overwrite }){
     newEvents.push({ date:iso, type, technicianId:extra.technicianId||null, siteId:extra.siteId||null, time:extra.time||'', title:extra.title||'', notes:'Auto-generated', completed: iso<=todayISO(), createdAt:new Date().toISOString() });
     if(type==='techVisit'){
       dm.techCount++; if(extra.technicianId) dm.techIds.add(extra.technicianId);
-      if(techById[extra.technicianId]?.region==='outside') dm.soloLock = true;
+      if(zoneByKey(techById[extra.technicianId]?.region).soloRequired) dm.soloLock = true;
       dm.kind = 'tech';
       const wk = isoToWeek[iso]; weeklyTechCount[wk] = (weeklyTechCount[wk]||0)+1;
     }
@@ -899,11 +910,11 @@ async function generateSchedule({ startISO, weeks, overwrite }){
   const sites = state.cache.sites.filter(s=>s.active && s.qaFrequencyDays && !s.isGeneral);
 
   /* ---- Tech visits: block-schedule by zone, most-overdue first (first pass = monthly cover) ---- */
-  const regionOrder = ['east','west','outside','floating'];
-  const tvBuckets = { east:[], west:[], outside:[], floating:[] };
+  const regionOrder = [...zoneList().map(z=>z.key), '']; // '' = unzoned fallback bucket, processed last
+  const tvBuckets = {}; regionOrder.forEach(k=>tvBuckets[k]=[]);
   techs.map(t=>({t, st:techVisitStatus(t)}))
     .sort((a,b)=> a.st.dueISO.localeCompare(b.st.dueISO))
-    .forEach(x => { (tvBuckets[x.t.region]||tvBuckets.floating).push(x); });
+    .forEach(x => { (tvBuckets[x.t.region] || tvBuckets['']).push(x); });
 
   if(workDays.length){
     let cursor = 0;
@@ -943,7 +954,7 @@ async function generateSchedule({ startISO, weeks, overwrite }){
         const day = weekDays.find(d=>{
           const dm = dayMap[d.iso];
           if(dm.soloLock || dm.kind==='qa') return false;
-          if(item.t.region==='outside') return dm.techCount===0;
+          if(zoneByKey(item.t.region).soloRequired) return dm.techCount===0;
           return dm.techCount<MAX_TECH_PER_DAY && !dm.techIds.has(item.t.id);
         });
         if(!day) { if(qi>topup.length*3) break; continue; }
@@ -953,10 +964,10 @@ async function generateSchedule({ startISO, weeks, overwrite }){
   }
 
   /* ---- QA visits: same zone block-scheduling, first pass = each due site once ---- */
-  const qaBuckets = { east:[], west:[], outside:[], floating:[] };
+  const qaBuckets = {}; regionOrder.forEach(k=>qaBuckets[k]=[]);
   sites.map(s=>({s, st:siteQAStatus(s)})).filter(x=>x.st)
     .sort((a,b)=> a.st.dueISO.localeCompare(b.st.dueISO))
-    .forEach(x => { (qaBuckets[x.s.region]||qaBuckets.floating).push(x); });
+    .forEach(x => { (qaBuckets[x.s.region] || qaBuckets['']).push(x); });
 
   if(workDays.length && sites.length){
     let cursor = 0;
@@ -1242,8 +1253,8 @@ function renderTechnicians(){
     </tr>`;
   }).join('');
 
-  const filters = ['all','east','west','floating','outside'].map(f=>{
-    const label = f==='all' ? 'All' : REGIONS[f].label;
+  const filters = ['all', ...zoneList().map(z=>z.key)].map(f=>{
+    const label = f==='all' ? 'All' : zoneByKey(f).label;
     return `<button class="chip ${state.techFilter===f?'active':''}" data-tf="${f}">${label}</button>`;
   }).join('');
 
@@ -1268,7 +1279,7 @@ function mountTechnicians(){
 function openTechnicianForm(editId){
   const existing = editId ? state.cache.technicians.find(t=>t.id===editId) : null;
   const v = existing || { name:'', region:'east', area:'', techFrequencyDays:30, oneOnOneFrequencyDays:30, active:true, workDays:[1,2,3,4,5] };
-  const regionOptions = Object.entries(REGIONS).map(([k,r])=>`<option value="${k}" ${v.region===k?'selected':''}>${r.label}</option>`).join('');
+  const regionOptions = zoneList().map(z=>`<option value="${z.key}" ${v.region===z.key?'selected':''}>${z.label}</option>`).join('');
   const workDays = (v.workDays && v.workDays.length) ? v.workDays : [1,2,3,4,5];
   const dayChecks = DOW_SHORT.map((d,i)=>{
     const dayNum = i+1;
@@ -1502,7 +1513,7 @@ function renderBulkImportPreview(rows, raw){
   const tableRows = rows.map(r=>`
     <tr style="${r.skip?'opacity:.45;':''}">
       <td><div class="row-name">${escapeHTML(r.name)}</div></td>
-      <td>${REGIONS[r.region].label}</td>
+      <td>${zoneByKey(r.region).label}</td>
       <td>${r.type==='qa'?'QA site':r.type==='tech'?'Tech site':'Other'}</td>
       <td>${r.qaFrequencyDays==null?'No fixed schedule':r.qaFrequencyDays+' days'}</td>
       <td>${r.skip ? `<span class="badge badge-neutral">${r.reason}</span>` : `<span class="badge badge-ok">Will import</span>`}</td>
@@ -1545,7 +1556,7 @@ function renderBulkImportPreview(rows, raw){
 function openSiteForm(editId){
   const existing = editId ? state.cache.sites.find(s=>s.id===editId) : null;
   const v = existing || { name:'', region:'east', address:'', type:'qa', qaFrequencyDays:30, technicianId:'', notes:'', active:true };
-  const regionOptions = Object.entries(REGIONS).map(([k,r])=>`<option value="${k}" ${v.region===k?'selected':''}>${r.label}</option>`).join('');
+  const regionOptions = zoneList().map(z=>`<option value="${z.key}" ${v.region===z.key?'selected':''}>${z.label}</option>`).join('');
   const techOptions = state.cache.technicians.map(t=>`<option value="${t.id}" ${v.technicianId==t.id?'selected':''}>${escapeHTML(t.name)}</option>`).join('');
 
   const body = `
@@ -2215,14 +2226,14 @@ function renderSearchResults(){
     const tv=techVisitStatus(t), oo=oneOnOneStatus(t);
     return `<div class="result-item" data-open-tech="${t.id}">
       <div class="row-name">${escapeHTML(t.name)}</div>
-      <div class="row-sub">${REGIONS[t.region].label} · Tech visit: ${tv.label} · 1-1: ${oo.label}</div>
+      <div class="row-sub">${zoneByKey(t.region).label} · Tech visit: ${tv.label} · 1-1: ${oo.label}</div>
     </div>`;
   });
   const siteHTML = siteMatches.map(s=>{
     const qa = siteQAStatus(s);
     return `<div class="result-item" data-open-site="${s.id}">
       <div class="row-name">${escapeHTML(s.name)}</div>
-      <div class="row-sub">${REGIONS[s.region].label}${qa? ' · QA: '+qa.label : ''}</div>
+      <div class="row-sub">${zoneByKey(s.region).label}${qa? ' · QA: '+qa.label : ''}</div>
     </div>`;
   });
   const eventHTML = eventMatches.map(e=>{
@@ -2254,6 +2265,18 @@ function renderSearchResults(){
 /* ================= SETTINGS ================= */
 function renderSettings(){
   const s = state.cache.settings || { techVisitsPerWeekMin:3, qaVisitsPerWeekMin:4, oneOnOnesPerWeekMax:3, wfhWeekday:3 };
+  const zones = zoneList();
+  const zoneRows = zones.length ? zones.map(z=>{
+    const memberCount = state.cache.technicians.filter(t=>t.region===z.key).length;
+    return `
+    <div class="watch-row">
+      <span class="dot" style="background:${z.color};margin-right:2px;"></span>
+      <div><div class="watch-name">${escapeHTML(z.label)}</div><div class="watch-meta">${memberCount} technician${memberCount===1?'':'s'}${z.soloRequired?' · always visited alone':''}</div></div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-edit-zone="${z.id}">Edit</button>
+      <button class="icon-btn" data-del-zone="${z.id}">Remove</button>
+    </div>`;
+  }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No zones yet.</p>`;
   const blocks = state.cache.recurringBlocks || [];
   const blockRows = blocks.length ? blocks.map(b=>{
     const rangeBits = [];
@@ -2285,6 +2308,12 @@ function renderSettings(){
     <button class="btn" id="setSave">Save settings</button>
   </div>
   <div class="card card-pad" style="max-width:480px;margin-top:16px;">
+    <h3 style="margin-bottom:4px;">Technician zones</h3>
+    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Groups used for batching visits by area (the Thames-divide idea, or whatever suits you). The generator schedules each zone's technicians on the same days where possible.</p>
+    <div id="zoneList">${zoneRows}</div>
+    <button class="btn btn-outline btn-small" id="addZoneBtn" style="margin-top:8px;">+ Add zone</button>
+  </div>
+  <div class="card card-pad" style="max-width:480px;margin-top:16px;">
     <h3 style="margin-bottom:4px;">Recurring blocked events</h3>
     <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Weekly commitments like Teams huddles or an extra WFH day. These appear on the board automatically every week but don't stop tech/QA visits being booked alongside them.</p>
     <div id="blockList">${blockRows}</div>
@@ -2300,6 +2329,59 @@ function renderSettings(){
     </div>
   </div>
   `;
+}
+function openZoneForm(editId){
+  const existing = editId ? zoneList().find(z=>z.id===editId) : null;
+  const v = existing || { label:'', color:'#2C6E8C', soloRequired:false };
+  const body = `
+    <div class="field"><label>Name</label><input id="zLabel" value="${escapeHTML(v.label)}" placeholder="e.g. North East, Overseas, Zone 4…"></div>
+    <div class="field"><label>Colour</label><input type="color" id="zColor" value="${v.color}" style="height:40px;padding:4px;"></div>
+    <div class="field"><label><input type="checkbox" id="zSolo" ${v.soloRequired?'checked':''} style="width:auto;"> Technicians in this zone are always visited alone</label>
+      <div class="freq-hint">Use this for a distant/outlying zone where it doesn't make sense to pair visits with anyone else that day.</div>
+    </div>
+  `;
+  const foot = `
+    ${existing ? `<button class="btn btn-danger" id="zDelete">Remove</button>` : `<span></span>`}
+    <div class="modal-foot-right"><button class="btn btn-outline" id="zCancel">Cancel</button><button class="btn" id="zSave">${existing?'Save':'Add'}</button></div>
+  `;
+  showModal(existing?'Edit zone':'Add zone', body, foot);
+  document.getElementById('zCancel').addEventListener('click', closeModal);
+  document.getElementById('zDelete')?.addEventListener('click', ()=>{ closeModal(); confirmDeleteZone(editId); });
+  document.getElementById('zSave').addEventListener('click', async ()=>{
+    const label = document.getElementById('zLabel').value.trim();
+    if(!label){ toast('Name is required'); return; }
+    const color = document.getElementById('zColor').value;
+    const soloRequired = document.getElementById('zSolo').checked;
+    if(existing){
+      await DB.put('zones', { ...existing, label, color, soloRequired });
+    } else {
+      // generate a stable, unique-ish key from the label
+      const base = label.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || 'zone';
+      let key = base, n = 1;
+      while(zoneList().some(z=>z.key===key)){ key = `${base}-${++n}`; }
+      const maxOrder = zoneList().reduce((m,z)=>Math.max(m, z.sortOrder||0), 0);
+      await DB.add('zones', { key, label, color, soloRequired, sortOrder: maxOrder+1, createdAt: new Date().toISOString() });
+    }
+    closeModal(); toast(existing?'Zone updated':'Zone added'); render();
+  });
+}
+function confirmDeleteZone(id){
+  const z = zoneList().find(x=>x.id===id);
+  if(!z) return;
+  const affectedTechs = state.cache.technicians.filter(t=>t.region===z.key).length;
+  const affectedSites = state.cache.sites.filter(s=>s.region===z.key).length;
+  const warn = (affectedTechs||affectedSites)
+    ? `<p style="font-size:12.5px;color:var(--clay);margin-top:8px;">${affectedTechs} technician${affectedTechs===1?'':'s'} and ${affectedSites} site${affectedSites===1?'':'s'} currently use this zone — they'll be marked as unzoned, not deleted.</p>`
+    : '';
+  showModal('Remove zone', `<p>Remove <strong>${escapeHTML(z.label)}</strong>?</p>${warn}`,
+    `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="cCancel">Cancel</button><button class="btn btn-danger" id="cConfirm">Remove</button></div>`);
+  document.getElementById('cCancel').addEventListener('click', closeModal);
+  document.getElementById('cConfirm').addEventListener('click', async ()=>{
+    for(const t of state.cache.technicians.filter(t=>t.region===z.key)) await DB.put('technicians', { ...t, region:'' });
+    for(const s of state.cache.sites.filter(s=>s.region===z.key)) await DB.put('sites', { ...s, region:'' });
+    await DB.delete('zones', id);
+    closeModal(); toast('Zone removed'); render();
+  });
 }
 function openBlockForm(editId){
   const existing = editId ? (state.cache.recurringBlocks||[]).find(b=>b.id===editId) : null;
@@ -2410,6 +2492,9 @@ function mountSettings(){
     });
     toast('Settings saved'); render();
   });
+  document.getElementById('addZoneBtn').addEventListener('click', ()=>openZoneForm());
+  document.querySelectorAll('[data-edit-zone]').forEach(b=>b.addEventListener('click', ()=>openZoneForm(Number(b.dataset.editZone))));
+  document.querySelectorAll('[data-del-zone]').forEach(b=>b.addEventListener('click', ()=>confirmDeleteZone(Number(b.dataset.delZone))));
   document.getElementById('addBlockBtn').addEventListener('click', ()=>openBlockForm());
   document.querySelectorAll('[data-edit-block]').forEach(b=>b.addEventListener('click', ()=>openBlockForm(Number(b.dataset.editBlock))));
   document.querySelectorAll('[data-clear-block]').forEach(b=>b.addEventListener('click', ()=>openBlockCleanup(Number(b.dataset.clearBlock), false)));
@@ -2421,6 +2506,10 @@ function mountSettings(){
       events: await DB.getAll('events'),
       settings: await DB.get('settings','settings'),
       recurringBlocks: await DB.getAll('recurring_blocks'),
+      zones: await DB.getAll('zones'),
+      huddleAttendance: await DB.getAll('huddle_attendance'),
+      fleetcheckRecords: await DB.getAll('fleetcheck_records'),
+      todos: await DB.getAll('todos'),
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});

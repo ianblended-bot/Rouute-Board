@@ -136,6 +136,13 @@ const DEFAULT_SETTINGS = {
   wfhWeekday: 3,
 };
 
+const SEED_ZONES = [
+  { key:'east',     label:'East · North bank',  color:'#2C6E8C', soloRequired:false, sortOrder:1 },
+  { key:'west',     label:'West · South bank',  color:'#8A5A2C', soloRequired:false, sortOrder:2 },
+  { key:'outside',  label:'Outside London',     color:'#6B4A8C', soloRequired:true,  sortOrder:3 },
+  { key:'floating', label:'Floating / exterior', color:'#2C8C6E', soloRequired:false, sortOrder:4 },
+];
+
 async function seedIfEmpty(){
   const existing = await DB.getAll('technicians');
   if(existing.length === 0){
@@ -157,6 +164,12 @@ async function seedIfEmpty(){
       isGeneral: true,
       createdAt: new Date().toISOString(),
     });
+  }
+  const existingZones = await DB.getAll('zones');
+  if(existingZones.length === 0){
+    for(const z of SEED_ZONES){
+      await DB.add('zones', { ...z, createdAt: new Date().toISOString() });
+    }
   }
   const settings = await DB.get('settings', 'settings');
   if(!settings){
