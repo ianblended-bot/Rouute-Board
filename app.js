@@ -559,11 +559,15 @@ function openEventForm(defaults, editId){
 
   const activeTechs = state.cache.technicians.filter(t=>t.active);
   const attendedSet = isEdit ? new Set(state.cache.huddleAttendance.filter(a=>a.eventId===editId && a.attended).map(a=>a.technicianId)) : new Set();
-  const attendanceRows = activeTechs.map(t=>`
+  const attendanceRows = activeTechs.map(t=>{
+    const onLeave = v.date && state.cache.events.some(e=>e.type==='techAbsence' && e.technicianId===t.id && e.date===v.date);
+    const notWorkDay = v.date && !onLeave && !isTechWorkingOn(t, v.date);
+    const tag = onLeave ? ' <span class="badge badge-neutral">On leave</span>' : notWorkDay ? ' <span class="badge badge-neutral">Not a work day</span>' : '';
+    return `
     <label style="display:flex;align-items:center;gap:8px;font-weight:400;text-transform:none;padding:4px 0;font-size:13px;color:var(--text);">
-      <input type="checkbox" class="fAttend" value="${t.id}" ${attendedSet.has(t.id)?'checked':''} style="width:auto;"> ${escapeHTML(t.name)}
-    </label>
-  `).join('');
+      <input type="checkbox" class="fAttend" value="${t.id}" ${attendedSet.has(t.id)?'checked':''} style="width:auto;"> ${escapeHTML(t.name)}${tag}
+    </label>`;
+  }).join('');
 
   const body = `
     <div class="field-row">
@@ -582,7 +586,7 @@ function openEventForm(defaults, editId){
     <div class="field" id="fAttendanceWrap" style="display:none;border-top:1px solid var(--line-soft);padding-top:14px;">
       <label>Attendance</label>
       <div id="fAttendanceList" style="max-height:220px;overflow-y:auto;">${attendanceRows}</div>
-      <div class="freq-hint">Tick who attended this one.</div>
+      <div class="freq-hint">Tick who attended this one. Anyone tagged "On leave" or "Not a work day" isn't counted against them in the attendance report either way.</div>
     </div>` : ''}
   `;
   const foot = `
@@ -1699,13 +1703,27 @@ function mountFleetCheck(){
 }
 
 /* ================= REPORTS ================= */
+function isTechWorkingOn(technician, iso){
+  // true if this is a day the technician is actually expected to be working:
+  // one of their contracted days, and no logged holiday/absence that date.
+  const workDays = (technician.workDays && technician.workDays.length) ? technician.workDays : [1,2,3,4,5];
+  const dow = fromISO(iso).getDay(); const isoDow = dow===0?7:dow;
+  if(!workDays.includes(isoDow)) return false;
+  const onLeave = state.cache.events.some(e=>e.type==='techAbsence' && e.technicianId===technician.id && e.date===iso);
+  if(onLeave) return false;
+  return true;
+}
 function buildHuddleAttendanceReport(startISO, endISO){
+  // Huddles that fall on a technician's holiday or non-work day don't count against
+  // them at all — the denominator is "huddles they were actually expected at", not
+  // every huddle that happened to occur in the range.
   const huddleEvents = state.cache.events.filter(e=>e.type==='block' && e.date>=startISO && e.date<=endISO);
   const techs = state.cache.technicians.filter(t=>t.active);
   const attendance = state.cache.huddleAttendance;
   return techs.map(t=>{
-    const attended = attendance.filter(a=>a.technicianId===t.id && a.attended && huddleEvents.some(e=>e.id===a.eventId)).length;
-    const total = huddleEvents.length;
+    const applicableHuddles = huddleEvents.filter(e=>isTechWorkingOn(t, e.date));
+    const attended = attendance.filter(a=>a.technicianId===t.id && a.attended && applicableHuddles.some(e=>e.id===a.eventId)).length;
+    const total = applicableHuddles.length;
     return { Technician: t.name, 'Huddles in range': total, Attended: attended, 'Attendance %': total ? Math.round(attended/total*100)+'%' : '—' };
   });
 }
@@ -1713,20 +1731,12 @@ function requiredWorkingDays(technician, startISO, endISO){
   // days this technician is actually expected to be working: their own contracted
   // days (defaults Mon-Fri, so weekends are excluded automatically), minus any
   // logged holiday/absence — matches the same rules the schedule generator uses.
-  const workDays = (technician.workDays && technician.workDays.length) ? technician.workDays : [1,2,3,4,5];
-  const absenceDates = new Set(
-    state.cache.events.filter(e => e.type==='techAbsence' && e.technicianId===technician.id).map(e=>e.date)
-  );
   const startD = fromISO(startISO);
   const totalDays = daysBetween(startISO, endISO) + 1;
   let count = 0;
   for(let i=0;i<totalDays;i++){
-    const d = addDays(startD, i);
-    const iso = toISO(d);
-    const dow = d.getDay(); const isoDow = dow===0?7:dow;
-    if(!workDays.includes(isoDow)) continue;
-    if(absenceDates.has(iso)) continue;
-    count++;
+    const iso = toISO(addDays(startD, i));
+    if(isTechWorkingOn(technician, iso)) count++;
   }
   return count;
 }
