@@ -35,16 +35,12 @@ function renderZoneKeySidebar(){
   el.innerHTML = zoneList().map(z=>`<div class="river-key-row"><span class="dot" style="background:${z.color};"></span>${escapeHTML(z.label)}</div>`).join('')
     || `<div class="river-key-row" style="color:#8A8578;">No zones yet</div>`;
 }
-const EVENT_TYPES = {
-  techVisit:   { label:'Tech visit', short:'Tech visit' },
-  qaVisit:     { label:'QA visit', short:'QA visit' },
-  oneOnOne:    { label:'1-1', short:'1-1' },
-  wfh:         { label:'Working from home', short:'WFH' },
-  leave:       { label:'Annual leave', short:'AL' },
-  techAbsence: { label:'Absence', short:'Absence' },
-  block:       { label:'Recurring block', short:'Block' },
-  other:       { label:'Other / admin', short:'Other' },
-};
+/* ---------------- event type metadata (dynamic — see Settings > Event types) ---------------- */
+const FALLBACK_EVENT_TYPE = { key:'other', label:'Other / admin', short:'Other', color:'#2C6E8C', isSystem:true };
+function eventTypeList(){ return state.cache.eventTypes || []; }
+function eventTypeByKey(key){
+  return eventTypeList().find(t=>t.key===key) || FALLBACK_EVENT_TYPE;
+}
 
 /* ---------------- app state ---------------- */
 const state = {
@@ -60,12 +56,12 @@ const state = {
   fleetCheckMonth: new Date(),
   reportsRange: 'month',
   todoFilter: 'open',
-  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[] },
+  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[] },
 };
 
 async function refreshCache(){
-  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones] = await Promise.all([
-    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones')
+  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes] = await Promise.all([
+    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types')
   ]);
   technicians.sort((a,b)=>a.name.localeCompare(b.name));
   sites.sort((a,b)=>a.name.localeCompare(b.name));
@@ -73,7 +69,8 @@ async function refreshCache(){
   recurringBlocks.sort((a,b)=>a.weekday-b.weekday);
   todos.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)); // newest first
   zones.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
-  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones };
+  eventTypes.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
+  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes };
 }
 
 /* ---------------- status / KPI computation ---------------- */
@@ -290,7 +287,7 @@ function renderDashboard(){
 
   const outstandingCount = missedEvents.length + unreviewedHuddles.length + driversNeedingDaily.length + driversNeedingMonthly.length;
   const outstandingRows = missedEvents.slice(0,8).map(e=>{
-    const t = EVENT_TYPES[e.type] || EVENT_TYPES.other;
+    const t = eventTypeByKey(e.type);
     const who = e.technicianId ? techName(e.technicianId) : null;
     const where = e.siteId ? siteName(e.siteId) : null;
     const label = e.title || who || where || t.label;
@@ -510,13 +507,13 @@ function renderSchedule(){
   `;
 }
 function eventTagHTML(e){
-  const t = EVENT_TYPES[e.type] || EVENT_TYPES.other;
+  const t = eventTypeByKey(e.type);
   const who = e.technicianId ? techName(e.technicianId) : null;
   const where = e.siteId ? siteName(e.siteId) : null;
   const title = e.title || who || where || t.label;
   const metaBits = [who && where ? where : null, e.time || null].filter(Boolean);
   const isMissed = !e.completed && e.date < todayISO();
-  return `<div class="event-tag type-${e.type} ${e.completed?'is-done':''} ${isMissed?'is-missed':''}" data-open-event="${e.id}">
+  return `<div class="event-tag ${e.completed?'is-done':''} ${isMissed?'is-missed':''}" data-open-event="${e.id}" style="border-left-color:${t.color}; background:color-mix(in srgb, ${t.color} 12%, white);">
     <button class="et-check" data-toggle-complete="${e.id}" title="${e.completed?'Mark not done':'Mark done'}" aria-label="Toggle complete">✓</button>
     <div class="et-body">
       <div class="et-type">${t.short}${isMissed?' · Missed':''}</div>
@@ -558,7 +555,7 @@ function openEventForm(defaults, editId){
 
   const techOptions = state.cache.technicians.filter(t=>t.active).map(t=>`<option value="${t.id}" ${v.technicianId==t.id?'selected':''}>${escapeHTML(t.name)}</option>`).join('');
   const siteOptions = state.cache.sites.filter(s=>s.active).map(s=>`<option value="${s.id}" ${v.siteId==s.id?'selected':''}>${escapeHTML(s.name)}</option>`).join('');
-  const typeOptions = Object.entries(EVENT_TYPES).map(([k,t])=>`<option value="${k}" ${v.type===k?'selected':''}>${t.label}</option>`).join('');
+  const typeOptions = eventTypeList().map(t=>`<option value="${t.key}" ${v.type===t.key?'selected':''}>${t.label}</option>`).join('');
 
   const activeTechs = state.cache.technicians.filter(t=>t.active);
   const attendedSet = isEdit ? new Set(state.cache.huddleAttendance.filter(a=>a.eventId===editId && a.attended).map(a=>a.technicianId)) : new Set();
@@ -1091,7 +1088,7 @@ function buildExportRows(startISO, endISO){
     .filter(e => e.date >= startISO && e.date <= endISO)
     .sort((a,b)=> a.date.localeCompare(b.date) || (a.time||'').localeCompare(b.time||''))
     .map(e=>{
-      const t = EVENT_TYPES[e.type] || EVENT_TYPES.other;
+      const t = eventTypeByKey(e.type);
       const who = e.technicianId ? techName(e.technicianId) : '';
       const where = e.siteId ? siteName(e.siteId) : '';
       const status = e.completed ? 'Done' : (e.date < todayISO() ? 'Missed' : 'Scheduled');
@@ -2243,7 +2240,7 @@ function renderSearchResults(){
     const statusBadge = isMissed ? `<span class="badge badge-overdue">Missed</span>` : e.completed ? `<span class="badge badge-ok">Done</span>` : `<span class="badge badge-scheduled">Scheduled</span>`;
     return `<div class="result-item" data-open-event="${e.id}" data-event-date="${e.date}" style="display:flex;align-items:center;gap:12px;">
       <div style="flex:1;min-width:0;">
-        <div class="row-name">${EVENT_TYPES[e.type].label}${who? ' — '+escapeHTML(who):''}${where? ' — '+escapeHTML(where):''}</div>
+        <div class="row-name">${eventTypeByKey(e.type).label}${who? ' — '+escapeHTML(who):''}${where? ' — '+escapeHTML(where):''}</div>
         <div class="row-sub">${humanDate(e.date)}${e.notes? ' · '+escapeHTML(e.notes).slice(0,80):''}</div>
       </div>
       ${statusBadge}
@@ -2292,6 +2289,17 @@ function renderSettings(){
       <button class="icon-btn" data-del-block="${b.id}">Remove</button>
     </div>`;
   }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No recurring blocks yet.</p>`;
+  const eventTypeRows = eventTypeList().length ? eventTypeList().map(t=>{
+    const usageCount = state.cache.events.filter(e=>e.type===t.key).length;
+    return `
+    <div class="watch-row">
+      <span class="dot" style="background:${t.color};margin-right:2px;"></span>
+      <div><div class="watch-name">${escapeHTML(t.label)}${t.isSystem?' <span class="badge badge-neutral" style="margin-left:4px;">Built-in</span>':''}</div><div class="watch-meta">Shows as "${escapeHTML(t.short)}" on the board · ${usageCount} event${usageCount===1?'':'s'} using it</div></div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-edit-etype="${t.id}">Edit</button>
+      ${t.isSystem ? '' : `<button class="icon-btn" data-del-etype="${t.id}">Remove</button>`}
+    </div>`;
+  }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No event types yet.</p>`;
   return `
   <div class="view-head"><div><h1>Settings</h1><div class="view-sub">KPI targets and defaults</div></div></div>
   <div class="card card-pad" style="max-width:480px;">
@@ -2314,6 +2322,12 @@ function renderSettings(){
     <button class="btn btn-outline btn-small" id="addZoneBtn" style="margin-top:8px;">+ Add zone</button>
   </div>
   <div class="card card-pad" style="max-width:480px;margin-top:16px;">
+    <h3 style="margin-bottom:4px;">Event types</h3>
+    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">The options in the "Type" dropdown when adding an event. Built-in types drive scheduling, cadence tracking, and reports, so they can be renamed and recoloured but not removed. Add your own for anything else — meetings, training, admin days.</p>
+    <div id="eventTypeList">${eventTypeRows}</div>
+    <button class="btn btn-outline btn-small" id="addEventTypeBtn" style="margin-top:8px;">+ Add event type</button>
+  </div>
+  <div class="card card-pad" style="max-width:480px;margin-top:16px;">
     <h3 style="margin-bottom:4px;">Recurring blocked events</h3>
     <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Weekly commitments like Teams huddles or an extra WFH day. These appear on the board automatically every week but don't stop tech/QA visits being booked alongside them.</p>
     <div id="blockList">${blockRows}</div>
@@ -2329,6 +2343,56 @@ function renderSettings(){
     </div>
   </div>
   `;
+}
+function openEventTypeForm(editId){
+  const existing = editId ? eventTypeList().find(t=>t.id===editId) : null;
+  const v = existing || { label:'', short:'', color:'#8A5A2C' };
+  const body = `
+    <div class="field"><label>Name</label><input id="etLabel" value="${escapeHTML(v.label)}" placeholder="e.g. Training, Client meeting…"></div>
+    <div class="field"><label>Short label (shown on the board tile)</label><input id="etShort" value="${escapeHTML(v.short)}" placeholder="e.g. Training" maxlength="16"></div>
+    <div class="field"><label>Colour</label><input type="color" id="etColor" value="${v.color}" style="height:40px;padding:4px;"></div>
+    ${existing?.isSystem ? `<p class="freq-hint">This is a built-in type used by scheduling/reports — you can rename or recolour it, but it can't be removed.</p>` : ''}
+  `;
+  const foot = `
+    ${existing && !existing.isSystem ? `<button class="btn btn-danger" id="etDelete">Remove</button>` : `<span></span>`}
+    <div class="modal-foot-right"><button class="btn btn-outline" id="etCancel">Cancel</button><button class="btn" id="etSave">${existing?'Save':'Add'}</button></div>
+  `;
+  showModal(existing?'Edit event type':'Add event type', body, foot);
+  document.getElementById('etCancel').addEventListener('click', closeModal);
+  document.getElementById('etDelete')?.addEventListener('click', ()=>{ closeModal(); confirmDeleteEventType(editId); });
+  document.getElementById('etSave').addEventListener('click', async ()=>{
+    const label = document.getElementById('etLabel').value.trim();
+    const short = document.getElementById('etShort').value.trim();
+    if(!label){ toast('Name is required'); return; }
+    if(!short){ toast('Short label is required'); return; }
+    const color = document.getElementById('etColor').value;
+    if(existing){
+      await DB.put('event_types', { ...existing, label, short, color });
+    } else {
+      const base = label.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || 'type';
+      let key = base, n = 1;
+      while(eventTypeList().some(t=>t.key===key)){ key = `${base}-${++n}`; }
+      const maxOrder = eventTypeList().reduce((m,t)=>Math.max(m, t.sortOrder||0), 0);
+      await DB.add('event_types', { key, label, short, color, isSystem:false, sortOrder: maxOrder+1, createdAt: new Date().toISOString() });
+    }
+    closeModal(); toast(existing?'Event type updated':'Event type added'); render();
+  });
+}
+function confirmDeleteEventType(id){
+  const t = eventTypeList().find(x=>x.id===id);
+  if(!t || t.isSystem) return;
+  const affected = state.cache.events.filter(e=>e.type===t.key).length;
+  const warn = affected
+    ? `<p style="font-size:12.5px;color:var(--clay);margin-top:8px;">${affected} existing event${affected===1?'':'s'} using this type will be switched to "Other / admin" — not deleted.</p>`
+    : '';
+  showModal('Remove event type', `<p>Remove <strong>${escapeHTML(t.label)}</strong>?</p>${warn}`,
+    `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="cCancel">Cancel</button><button class="btn btn-danger" id="cConfirm">Remove</button></div>`);
+  document.getElementById('cCancel').addEventListener('click', closeModal);
+  document.getElementById('cConfirm').addEventListener('click', async ()=>{
+    for(const e of state.cache.events.filter(e=>e.type===t.key)) await DB.put('events', { ...e, type:'other' });
+    await DB.delete('event_types', id);
+    closeModal(); toast('Event type removed'); render();
+  });
 }
 function openZoneForm(editId){
   const existing = editId ? zoneList().find(z=>z.id===editId) : null;
@@ -2495,6 +2559,9 @@ function mountSettings(){
   document.getElementById('addZoneBtn').addEventListener('click', ()=>openZoneForm());
   document.querySelectorAll('[data-edit-zone]').forEach(b=>b.addEventListener('click', ()=>openZoneForm(Number(b.dataset.editZone))));
   document.querySelectorAll('[data-del-zone]').forEach(b=>b.addEventListener('click', ()=>confirmDeleteZone(Number(b.dataset.delZone))));
+  document.getElementById('addEventTypeBtn').addEventListener('click', ()=>openEventTypeForm());
+  document.querySelectorAll('[data-edit-etype]').forEach(b=>b.addEventListener('click', ()=>openEventTypeForm(Number(b.dataset.editEtype))));
+  document.querySelectorAll('[data-del-etype]').forEach(b=>b.addEventListener('click', ()=>confirmDeleteEventType(Number(b.dataset.delEtype))));
   document.getElementById('addBlockBtn').addEventListener('click', ()=>openBlockForm());
   document.querySelectorAll('[data-edit-block]').forEach(b=>b.addEventListener('click', ()=>openBlockForm(Number(b.dataset.editBlock))));
   document.querySelectorAll('[data-clear-block]').forEach(b=>b.addEventListener('click', ()=>openBlockCleanup(Number(b.dataset.clearBlock), false)));

@@ -143,6 +143,17 @@ const SEED_ZONES = [
   { key:'floating', label:'Floating / exterior', color:'#2C8C6E', soloRequired:false, sortOrder:4 },
 ];
 
+const SEED_EVENT_TYPES = [
+  { key:'techVisit',   label:'Tech visit',          short:'Tech visit', color:'#2F6656', isSystem:true, sortOrder:1 },
+  { key:'qaVisit',     label:'QA visit',             short:'QA visit',   color:'#B9861F', isSystem:true, sortOrder:2 },
+  { key:'oneOnOne',    label:'1-1',                  short:'1-1',        color:'#6B4A8C', isSystem:true, sortOrder:3 },
+  { key:'wfh',         label:'Working from home',    short:'WFH',        color:'#9A9689', isSystem:true, sortOrder:4 },
+  { key:'leave',       label:'Annual leave',         short:'AL',         color:'#AD4A32', isSystem:true, sortOrder:5 },
+  { key:'techAbsence', label:'Absence',              short:'Absence',    color:'#AD4A32', isSystem:true, sortOrder:6 },
+  { key:'block',       label:'Recurring block',      short:'Block',      color:'#8A5A2C', isSystem:true, sortOrder:7 },
+  { key:'other',       label:'Other / admin',        short:'Other',      color:'#2C6E8C', isSystem:true, sortOrder:8 },
+];
+
 async function seedIfEmpty(){
   const existing = await DB.getAll('technicians');
   if(existing.length === 0){
@@ -169,6 +180,12 @@ async function seedIfEmpty(){
   if(existingZones.length === 0){
     for(const z of SEED_ZONES){
       await DB.add('zones', { ...z, createdAt: new Date().toISOString() });
+    }
+  }
+  const existingEventTypes = await DB.getAll('event_types');
+  if(existingEventTypes.length === 0){
+    for(const et of SEED_EVENT_TYPES){
+      await DB.add('event_types', { ...et, createdAt: new Date().toISOString() });
     }
   }
   const settings = await DB.get('settings', 'settings');
