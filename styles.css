@@ -316,6 +316,52 @@ tbody tr:hover{ background:var(--paper-dim); }
 .modal-foot{ display:flex; justify-content:space-between; gap:8px; padding:0 20px 20px; }
 .modal-foot-right{ display:flex; gap:8px; }
 
+.skip-link{ position:absolute; left:-999px; }
+
+.freq-hint{ font-size:11.5px; color:var(--text-faint); margin-top:4px; }
+
+/* ================= to-do list ================= */
+.todo-row{
+  display:grid; grid-template-columns:auto 1fr auto; grid-template-areas:"check body actions";
+  align-items:flex-start; gap:10px; padding:11px 12px; border-radius:8px;
+}
+.todo-row:hover{ background:var(--paper-dim); }
+.todo-row + .todo-row{ border-top:1px solid var(--line-soft); }
+.todo-row > .et-check{ grid-area:check; }
+.todo-body{ grid-area:body; min-width:0; }
+.todo-row > .row-actions{ grid-area:actions; }
+.todo-text{ font-size:13.5px; font-weight:600; color:var(--ink); line-height:1.4; }
+.todo-row.is-done .todo-text{ text-decoration:line-through; color:var(--text-faint); font-weight:500; }
+.todo-meta{ display:flex; gap:6px; flex-wrap:wrap; margin-top:5px; }
+.todo-add-row{ display:flex; gap:8px; margin-bottom:16px; }
+.todo-add-row input{ flex:1; }
+.todo-banner{
+  display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  background:var(--gold-bg); border:1px solid var(--gold); border-radius:10px;
+  padding:12px 16px; margin-bottom:16px; font-size:13px; color:var(--ink);
+}
+.todo-banner .btn{ padding:7px 12px; font-size:12.5px; }
+
+/* ================= auth screen ================= */
+.auth-screen{
+  position:fixed; inset:0; background:var(--paper); z-index:300;
+  display:flex; align-items:center; justify-content:center; padding:20px;
+}
+.auth-screen[hidden]{ display:none; }
+.auth-card{
+  background:var(--card); border:1px solid var(--line-soft); border-radius:14px;
+  box-shadow:var(--shadow-2); padding:32px 30px; width:100%; max-width:380px;
+}
+.auth-brand{ display:flex; align-items:center; gap:10px; margin-bottom:20px; }
+.auth-brand .brand-mark{ width:30px; height:30px; color:var(--forest-dim); }
+.auth-card h2{ font-size:20px; margin-bottom:16px; }
+.auth-error{ font-size:12.5px; margin:-6px 0 12px; line-height:1.5; }
+.btn-link{
+  display:block; width:100%; text-align:center; background:none; border:none;
+  color:var(--text-dim); font-size:12.5px; font-weight:600; margin-top:12px; padding:6px;
+}
+.btn-link:hover{ color:var(--forest-dim); }
+
 /* ================= responsive ================= */
 @media (max-width:880px){
   .app{ flex-direction:column; }
@@ -364,45 +410,18 @@ tbody tr:hover{ background:var(--paper-dim); }
   /* bigger touch targets */
   .et-check{ width:20px; height:20px; }
   .icon-btn{ padding:8px 11px; }
-}
 
-.skip-link{ position:absolute; left:-999px; }
-
-.freq-hint{ font-size:11.5px; color:var(--text-faint); margin-top:4px; }
-
-/* ================= to-do list ================= */
-.todo-row{ display:flex; align-items:flex-start; gap:10px; padding:11px 12px; border-radius:8px; }
-.todo-row:hover{ background:var(--paper-dim); }
-.todo-row + .todo-row{ border-top:1px solid var(--line-soft); }
-.todo-body{ flex:1; min-width:0; }
-.todo-text{ font-size:13.5px; font-weight:600; color:var(--ink); line-height:1.4; }
-.todo-row.is-done .todo-text{ text-decoration:line-through; color:var(--text-faint); font-weight:500; }
-.todo-meta{ display:flex; gap:6px; flex-wrap:wrap; margin-top:5px; }
-.todo-add-row{ display:flex; gap:8px; margin-bottom:16px; }
-.todo-add-row input{ flex:1; }
-.todo-banner{
-  display:flex; align-items:center; gap:12px; flex-wrap:wrap;
-  background:var(--gold-bg); border:1px solid var(--gold); border-radius:10px;
-  padding:12px 16px; margin-bottom:16px; font-size:13px; color:var(--ink);
+  /* to-do rows: actions drop to their own line, indented under the title
+     column (not the checkbox), as one even row of full-width buttons */
+  .todo-row{
+    grid-template-columns:auto 1fr;
+    grid-template-areas:"check body" ". actions";
+    row-gap:8px;
+  }
+  .todo-row > .row-actions{
+    width:100%; justify-content:stretch;
+  }
+  .todo-row > .row-actions .icon-btn{
+    flex:1; text-align:center; padding:8px 4px; font-size:12px;
+  }
 }
-.todo-banner .btn{ padding:7px 12px; font-size:12.5px; }
-
-/* ================= auth screen ================= */
-.auth-screen{
-  position:fixed; inset:0; background:var(--paper); z-index:300;
-  display:flex; align-items:center; justify-content:center; padding:20px;
-}
-.auth-screen[hidden]{ display:none; }
-.auth-card{
-  background:var(--card); border:1px solid var(--line-soft); border-radius:14px;
-  box-shadow:var(--shadow-2); padding:32px 30px; width:100%; max-width:380px;
-}
-.auth-brand{ display:flex; align-items:center; gap:10px; margin-bottom:20px; }
-.auth-brand .brand-mark{ width:30px; height:30px; color:var(--forest-dim); }
-.auth-card h2{ font-size:20px; margin-bottom:16px; }
-.auth-error{ font-size:12.5px; margin:-6px 0 12px; line-height:1.5; }
-.btn-link{
-  display:block; width:100%; text-align:center; background:none; border:none;
-  color:var(--text-dim); font-size:12.5px; font-weight:600; margin-top:12px; padding:6px;
-}
-.btn-link:hover{ color:var(--forest-dim); }

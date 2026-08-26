@@ -1933,7 +1933,7 @@ function renderTodos(){
         <div class="todo-meta">${todoDueBadge(t)}${todoAlertBadge(t)}${todoSourceBadge(t)}</div>
       </div>
       <div class="row-actions">
-        ${!t.completed ? `<button class="icon-btn" data-rollover-todo="${t.id}">Move to…</button>` : ''}
+        ${!t.completed ? `<button class="icon-btn" data-rollover-todo="${t.id}">Move</button>` : ''}
         <button class="icon-btn" data-edit-todo="${t.id}">Edit</button>
         <button class="icon-btn" data-del-todo="${t.id}">Delete</button>
       </div>
