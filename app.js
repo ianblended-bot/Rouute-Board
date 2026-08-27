@@ -56,6 +56,8 @@ const state = {
   fleetCheckMonth: new Date(),
   reportsRange: 'month',
   todoFilter: 'open',
+  todoViewMode: 'list',
+  todoViewDate: new Date(),
   cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[] },
 };
 
@@ -1920,10 +1922,41 @@ function todoSourceBadge(t){
   return `<span class="badge badge-scheduled">${escapeHTML(t.source)}</span>`;
 }
 function renderTodos(){
-  const list = getFilteredTodos();
+  const mode = state.todoViewMode || 'list';
   const allTodos = state.cache.todos;
   const openCount = allTodos.filter(t=>!t.completed).length;
-  const overdueCount = allTodos.filter(t=>!t.completed && t.dueDate && t.dueDate < todayISO()).length;
+
+  const filters = [['all','All'],['open','Open'],['completed','Completed']].map(([f,label])=>
+    `<button class="chip ${state.todoFilter===f?'active':''}" data-todo-filter="${f}">${label}</button>`).join('');
+
+  const notifStatus = ('Notification' in window) ? Notification.permission : 'unsupported';
+  const notifLabel = notifStatus==='granted' ? '🔔 Alerts on' : notifStatus==='denied' ? 'Alerts blocked' : '🔔 Enable alerts';
+
+  const modeToggle = `
+  <div class="toolbar"><div class="chip-filter">
+    <button class="chip ${mode==='list'?'active':''}" data-todo-mode="list">List</button>
+    <button class="chip ${mode==='day'?'active':''}" data-todo-mode="day">By day</button>
+  </div></div>`;
+
+  let dayNav = '', dayRollover = '', list;
+  if(mode === 'day'){
+    const viewDate = state.todoViewDate || new Date();
+    const viewISO = toISO(viewDate);
+    const isToday = viewISO === todayISO();
+    list = getFilteredTodos().filter(t => t.dueDate === viewISO);
+    dayNav = `
+    <div class="todo-daynav">
+      <button class="btn btn-outline" id="todoDayPrev">‹</button>
+      <div class="todo-daynav-label">
+        <div class="todo-daynav-date">${humanDate(viewISO)}</div>
+        ${isToday ? `<div class="todo-daynav-today">Today</div>` : ''}
+      </div>
+      <button class="btn btn-outline" id="todoDayNext">›</button>
+    </div>`;
+    dayRollover = `<button class="btn btn-outline" id="todoDayRollover" style="width:100%;margin-bottom:14px;">Move all to tomorrow</button>`;
+  } else {
+    list = getFilteredTodos();
+  }
 
   const rows = list.map(t=>`
     <div class="todo-row ${t.completed?'is-done':''}">
@@ -1940,37 +1973,48 @@ function renderTodos(){
     </div>
   `).join('');
 
-  const filters = [['all','All'],['open','Open'],['completed','Completed']].map(([f,label])=>
-    `<button class="chip ${state.todoFilter===f?'active':''}" data-todo-filter="${f}">${label}</button>`).join('');
-
-  const notifStatus = ('Notification' in window) ? Notification.permission : 'unsupported';
-  const notifLabel = notifStatus==='granted' ? '🔔 Alerts on' : notifStatus==='denied' ? 'Alerts blocked' : '🔔 Enable alerts';
+  const emptyMsg = mode==='day'
+    ? 'Nothing due this day.'
+    : (state.todoFilter==='completed' ? 'No completed tasks yet.' : 'Add a task above to get started.');
 
   return `
   <div class="view-head">
     <div><h1>To-Do</h1><div class="view-sub">${openCount} open task${openCount===1?'':'s'}</div></div>
     <div class="view-actions">
       <button class="btn btn-outline" id="todoNotifBtn" ${notifStatus==='denied'||notifStatus==='unsupported'?'disabled':''}>${notifLabel}</button>
+      <button class="btn btn-outline" id="todoMoveTasksBtn">Move tasks</button>
       <button class="btn btn-outline" id="todoExportBtn">⬇ Export</button>
     </div>
   </div>
-  ${overdueCount ? `
-  <div class="todo-banner">
-    <span>⚠ ${overdueCount} overdue task${overdueCount===1?'':'s'}</span>
-    <button class="btn btn-outline" id="todoRolloverAllTomorrow">Roll all to tomorrow</button>
-    <button class="btn btn-outline" id="todoRolloverAllPick">Pick a date…</button>
-  </div>` : ''}
   <div class="todo-add-row">
     <input type="text" id="todoQuickAdd" placeholder="Add a task and press Enter…">
     <button class="btn" id="todoQuickAddBtn">+ Add</button>
     <button class="btn btn-outline" id="todoFullAddBtn">+ Details…</button>
   </div>
+  ${modeToggle}
+  ${dayNav}
+  ${dayRollover}
   <div class="toolbar"><div class="chip-filter">${filters}</div></div>
-  ${list.length ? `<div class="card" style="padding:4px 8px;">${rows}</div>` : `<div class="card empty"><h3>Nothing here</h3><p>${state.todoFilter==='completed'?'No completed tasks yet.':'Add a task above to get started.'}</p></div>`}
+  ${list.length ? `<div class="card" style="padding:4px 8px;">${rows}</div>` : `<div class="card empty"><h3>Nothing here</h3><p>${emptyMsg}</p></div>`}
   `;
 }
 function mountTodos(){
   document.querySelectorAll('[data-todo-filter]').forEach(b=>b.addEventListener('click', ()=>{ state.todoFilter=b.dataset.todoFilter; render(); }));
+  document.querySelectorAll('[data-todo-mode]').forEach(b=>b.addEventListener('click', ()=>{ state.todoViewMode=b.dataset.todoMode; render(); }));
+  document.getElementById('todoDayPrev')?.addEventListener('click', ()=>{ state.todoViewDate = addDays(state.todoViewDate||new Date(), -1); render(); });
+  document.getElementById('todoDayNext')?.addEventListener('click', ()=>{ state.todoViewDate = addDays(state.todoViewDate||new Date(), 1); render(); });
+  document.getElementById('todoDayRollover')?.addEventListener('click', async ()=>{
+    const viewISO = toISO(state.todoViewDate||new Date());
+    const dayIds = state.cache.todos.filter(t=>!t.completed && t.dueDate===viewISO).map(t=>t.id);
+    if(!dayIds.length){ toast('Nothing to move on this day'); return; }
+    const nextISO = isoAddDays(viewISO, 1);
+    await bulkRolloverTodos(nextISO, dayIds);
+    toast(`Moved to ${humanDate(nextISO)}`); render();
+  });
+  document.getElementById('todoMoveTasksBtn').addEventListener('click', ()=>{
+    const overdueIds = state.cache.todos.filter(t=>!t.completed && t.dueDate && t.dueDate<todayISO()).map(t=>t.id);
+    openRolloverModal(overdueIds);
+  });
 
   const quickAdd = document.getElementById('todoQuickAdd');
   async function quickAddTodo(){
@@ -1995,15 +2039,6 @@ function mountTodos(){
     toast('Task deleted'); render();
   }));
   document.querySelectorAll('[data-rollover-todo]').forEach(b=>b.addEventListener('click', ()=>openRolloverModal([Number(b.dataset.rolloverTodo)])));
-
-  document.getElementById('todoRolloverAllTomorrow')?.addEventListener('click', async ()=>{
-    await bulkRolloverTodos(isoAddDays(todayISO(),1));
-    toast('Overdue tasks moved to tomorrow'); render();
-  });
-  document.getElementById('todoRolloverAllPick')?.addEventListener('click', ()=>{
-    const overdueIds = state.cache.todos.filter(t=>!t.completed && t.dueDate && t.dueDate<todayISO()).map(t=>t.id);
-    openRolloverModal(overdueIds);
-  });
 
   document.getElementById('todoNotifBtn')?.addEventListener('click', async ()=>{
     const granted = await requestNotificationPermission();
