@@ -424,4 +424,9 @@ tbody tr:hover{ background:var(--paper-dim); }
   .todo-row > .row-actions .icon-btn{
     flex:1; text-align:center; padding:8px 4px; font-size:12px;
   }
+
+  /* iOS Safari auto-zooms in on any input under 16px when tapped, and can get
+     stuck zoomed in afterwards — this keeps every field at/above that threshold
+     on mobile so tapping into a field never triggers it in the first place. */
+  input, select, textarea{ font-size:16px; }
 }
