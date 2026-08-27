@@ -1953,7 +1953,7 @@ function renderTodos(){
       </div>
       <button class="btn btn-outline" id="todoDayNext">›</button>
     </div>`;
-    dayRollover = `<button class="btn btn-outline" id="todoDayRollover" style="width:100%;margin-bottom:14px;">Move all to tomorrow</button>`;
+    dayRollover = `<div class="toolbar"><button class="chip" id="todoDayRollover">Move all to next day</button></div>`;
   } else {
     list = getFilteredTodos();
   }
@@ -1982,7 +1982,6 @@ function renderTodos(){
     <div><h1>To-Do</h1><div class="view-sub">${openCount} open task${openCount===1?'':'s'}</div></div>
     <div class="view-actions">
       <button class="btn btn-outline" id="todoNotifBtn" ${notifStatus==='denied'||notifStatus==='unsupported'?'disabled':''}>${notifLabel}</button>
-      <button class="btn btn-outline" id="todoMoveTasksBtn">Move tasks</button>
       <button class="btn btn-outline" id="todoExportBtn">⬇ Export</button>
     </div>
   </div>
@@ -2010,10 +2009,6 @@ function mountTodos(){
     const nextISO = isoAddDays(viewISO, 1);
     await bulkRolloverTodos(nextISO, dayIds);
     toast(`Moved to ${humanDate(nextISO)}`); render();
-  });
-  document.getElementById('todoMoveTasksBtn').addEventListener('click', ()=>{
-    const overdueIds = state.cache.todos.filter(t=>!t.completed && t.dueDate && t.dueDate<todayISO()).map(t=>t.id);
-    openRolloverModal(overdueIds);
   });
 
   const quickAdd = document.getElementById('todoQuickAdd');

@@ -427,4 +427,13 @@ tbody tr:hover{ background:var(--paper-dim); }
      stuck zoomed in afterwards — this keeps every field at/above that threshold
      on mobile so tapping into a field never triggers it in the first place. */
   input, select, textarea{ font-size:16px; }
+
+  /* view-head buttons (Enable alerts, Export, etc.) wrap to fill each row evenly
+     instead of leaving an orphaned narrow button dangling alone on its own line */
+  .view-actions{ width:100%; }
+  .view-actions .btn{ flex:1 1 auto; min-width:calc(50% - 4px); text-align:center; justify-content:center; }
+
+  /* to-do day navigation: keep the arrows close to the date as one compact
+     group, rather than stretched to the far edges of the card */
+  .todo-daynav{ justify-content:center; gap:18px; }
 }
