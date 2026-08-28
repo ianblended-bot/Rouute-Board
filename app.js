@@ -56,7 +56,7 @@ const state = {
   fleetCheckMonth: new Date(),
   reportsRange: 'month',
   todoFilter: 'open',
-  todoViewMode: 'list',
+  todoViewMode: 'day',
   todoViewDate: new Date(),
   cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[] },
 };
@@ -190,6 +190,7 @@ function navigate(route){
   document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active', b.dataset.route===route));
   document.getElementById('topbarTitle').textContent = ROUTE_TITLES[route] || '';
   document.getElementById('app').classList.remove('nav-open');
+  document.getElementById('topbarSettings').hidden = route !== 'todos';
   render();
 }
 
@@ -1922,21 +1923,8 @@ function todoSourceBadge(t){
   return `<span class="badge badge-scheduled">${escapeHTML(t.source)}</span>`;
 }
 function renderTodos(){
-  const mode = state.todoViewMode || 'list';
+  const mode = state.todoViewMode || 'day';
   const allTodos = state.cache.todos;
-  const openCount = allTodos.filter(t=>!t.completed).length;
-
-  const filters = [['all','All'],['open','Open'],['completed','Completed']].map(([f,label])=>
-    `<button class="chip ${state.todoFilter===f?'active':''}" data-todo-filter="${f}">${label}</button>`).join('');
-
-  const notifStatus = ('Notification' in window) ? Notification.permission : 'unsupported';
-  const notifLabel = notifStatus==='granted' ? '🔔 Alerts on' : notifStatus==='denied' ? 'Alerts blocked' : '🔔 Enable alerts';
-
-  const modeToggle = `
-  <div class="toolbar"><div class="chip-filter">
-    <button class="chip ${mode==='list'?'active':''}" data-todo-mode="list">List</button>
-    <button class="chip ${mode==='day'?'active':''}" data-todo-mode="day">By day</button>
-  </div></div>`;
 
   let dayNav = '', dayRollover = '', list;
   if(mode === 'day'){
@@ -1953,53 +1941,94 @@ function renderTodos(){
       </div>
       <button class="btn btn-outline" id="todoDayNext">›</button>
     </div>`;
-    dayRollover = `<div class="toolbar"><button class="chip" id="todoDayRollover">Move all to next day</button></div>`;
+    dayRollover = `<button class="btn" id="todoDayRollover" style="width:100%;margin-top:14px;justify-content:center;">Move all to next day</button>`;
   } else {
     list = getFilteredTodos();
   }
 
   const rows = list.map(t=>`
-    <div class="todo-row ${t.completed?'is-done':''}">
+    <div class="todo-row-min ${t.completed?'is-done':''}">
       <button class="et-check ${t.completed?'is-done':''}" data-toggle-todo="${t.id}" title="${t.completed?'Mark not done':'Mark done'}">✓</button>
       <div class="todo-body">
         <div class="todo-text">${escapeHTML(t.text)}</div>
-        <div class="todo-meta">${todoDueBadge(t)}${todoAlertBadge(t)}${todoSourceBadge(t)}</div>
+        ${mode!=='day' ? `<div class="todo-meta">${todoDueBadge(t)}${todoAlertBadge(t)}${todoSourceBadge(t)}</div>` : (todoAlertBadge(t) ? `<div class="todo-meta">${todoAlertBadge(t)}</div>` : '')}
       </div>
-      <div class="row-actions">
-        ${!t.completed ? `<button class="icon-btn" data-rollover-todo="${t.id}">Move</button>` : ''}
-        <button class="icon-btn" data-edit-todo="${t.id}">Edit</button>
-        <button class="icon-btn" data-del-todo="${t.id}">Delete</button>
-      </div>
+      <button class="todo-kebab" data-todo-menu="${t.id}" aria-label="Task options">⋯</button>
     </div>
   `).join('');
 
   const emptyMsg = mode==='day'
     ? 'Nothing due this day.'
-    : (state.todoFilter==='completed' ? 'No completed tasks yet.' : 'Add a task above to get started.');
+    : (state.todoFilter==='completed' ? 'No completed tasks yet.' : 'Add a task to get started.');
 
   return `
-  <div class="view-head">
-    <div><h1>To-Do</h1><div class="view-sub">${openCount} open task${openCount===1?'':'s'}</div></div>
-    <div class="view-actions">
-      <button class="btn btn-outline" id="todoNotifBtn" ${notifStatus==='denied'||notifStatus==='unsupported'?'disabled':''}>${notifLabel}</button>
-      <button class="btn btn-outline" id="todoExportBtn">⬇ Export</button>
+  <div class="view-head" id="todoViewHead">
+    <div></div>
+    <div class="view-actions" id="todoViewActions">
+      <button class="btn btn-outline" id="todoDesktopSettings">⋯ Settings</button>
+      <button class="btn" id="todoDesktopAdd">+ Add task</button>
     </div>
   </div>
-  <div class="todo-add-row">
-    <input type="text" id="todoQuickAdd" placeholder="Add a task and press Enter…">
-    <button class="btn" id="todoQuickAddBtn">+ Add</button>
-    <button class="btn btn-outline" id="todoFullAddBtn">+ Details…</button>
-  </div>
-  ${modeToggle}
   ${dayNav}
-  ${dayRollover}
-  <div class="toolbar"><div class="chip-filter">${filters}</div></div>
   ${list.length ? `<div class="card" style="padding:4px 8px;">${rows}</div>` : `<div class="card empty"><h3>Nothing here</h3><p>${emptyMsg}</p></div>`}
+  ${dayRollover}
   `;
 }
+function openTodoRowMenu(id){
+  const t = state.cache.todos.find(x=>x.id===id);
+  if(!t) return;
+  const body = `<p style="font-size:14px;font-weight:600;color:var(--ink);margin-bottom:2px;">${escapeHTML(t.text)}</p>`;
+  const foot = `
+    <div class="modal-foot-right" style="width:100%;flex-direction:column;gap:8px;">
+      ${!t.completed ? `<button class="btn btn-outline" id="rmMove" style="width:100%;justify-content:center;">Move to a date…</button>` : ''}
+      <button class="btn btn-outline" id="rmEdit" style="width:100%;justify-content:center;">Edit</button>
+      <button class="btn btn-danger" id="rmDelete" style="width:100%;justify-content:center;">Delete</button>
+    </div>`;
+  showModal('Task options', body, foot);
+  document.getElementById('rmMove')?.addEventListener('click', ()=>openRolloverModal([id]));
+  document.getElementById('rmEdit').addEventListener('click', ()=>openTodoForm(id));
+  document.getElementById('rmDelete').addEventListener('click', async ()=>{
+    await DB.delete('todos', id);
+    closeModal(); toast('Task deleted'); render();
+  });
+}
+function openTodoSettingsModal(){
+  const notifStatus = ('Notification' in window) ? Notification.permission : 'unsupported';
+  const notifLabel = notifStatus==='granted' ? '🔔 Alerts on' : notifStatus==='denied' ? 'Alerts blocked' : '🔔 Enable alerts';
+  const mode = state.todoViewMode || 'day';
+  const body = `
+    <div class="field">
+      <label>View</label>
+      <div class="chip-filter">
+        <button class="chip ${mode==='day'?'active':''}" data-todo-mode="day">By day</button>
+        <button class="chip ${mode==='list'?'active':''}" data-todo-mode="list">List</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>Show</label>
+      <div class="chip-filter">
+        <button class="chip ${state.todoFilter==='all'?'active':''}" data-todo-filter="all">All</button>
+        <button class="chip ${state.todoFilter==='open'?'active':''}" data-todo-filter="open">Open</button>
+        <button class="chip ${state.todoFilter==='completed'?'active':''}" data-todo-filter="completed">Completed</button>
+      </div>
+    </div>
+    <div class="field" style="display:flex;gap:8px;">
+      <button class="btn btn-outline" id="todoNotifBtn" ${notifStatus==='denied'||notifStatus==='unsupported'?'disabled':''} style="flex:1;justify-content:center;">${notifLabel}</button>
+      <button class="btn btn-outline" id="todoExportBtn" style="flex:1;justify-content:center;">⬇ Export</button>
+    </div>
+  `;
+  showModal('To-Do settings', body, `<span></span><div class="modal-foot-right"><button class="btn" id="todoSettingsDone">Done</button></div>`);
+  document.getElementById('todoSettingsDone').addEventListener('click', closeModal);
+  document.querySelectorAll('[data-todo-mode]').forEach(b=>b.addEventListener('click', ()=>{ state.todoViewMode=b.dataset.todoMode; closeModal(); render(); }));
+  document.querySelectorAll('[data-todo-filter]').forEach(b=>b.addEventListener('click', ()=>{ state.todoFilter=b.dataset.todoFilter; closeModal(); render(); }));
+  document.getElementById('todoNotifBtn').addEventListener('click', async ()=>{
+    const granted = await requestNotificationPermission();
+    toast(granted ? 'Browser alerts enabled' : 'Alerts not enabled');
+    closeModal(); render();
+  });
+  document.getElementById('todoExportBtn').addEventListener('click', ()=>{ closeModal(); openTodoExportModal(); });
+}
 function mountTodos(){
-  document.querySelectorAll('[data-todo-filter]').forEach(b=>b.addEventListener('click', ()=>{ state.todoFilter=b.dataset.todoFilter; render(); }));
-  document.querySelectorAll('[data-todo-mode]').forEach(b=>b.addEventListener('click', ()=>{ state.todoViewMode=b.dataset.todoMode; render(); }));
   document.getElementById('todoDayPrev')?.addEventListener('click', ()=>{ state.todoViewDate = addDays(state.todoViewDate||new Date(), -1); render(); });
   document.getElementById('todoDayNext')?.addEventListener('click', ()=>{ state.todoViewDate = addDays(state.todoViewDate||new Date(), 1); render(); });
   document.getElementById('todoDayRollover')?.addEventListener('click', async ()=>{
@@ -2011,36 +2040,16 @@ function mountTodos(){
     toast(`Moved to ${humanDate(nextISO)}`); render();
   });
 
-  const quickAdd = document.getElementById('todoQuickAdd');
-  async function quickAddTodo(){
-    const text = quickAdd.value.trim();
-    if(!text) return;
-    await DB.add('todos', { text, completed:false, dueDate: todayISO(), alertAt:null, alertFired:false, source:'manual', sourceRef:null, createdAt:new Date().toISOString() });
-    render();
-  }
-  document.getElementById('todoQuickAddBtn').addEventListener('click', quickAddTodo);
-  quickAdd.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); quickAddTodo(); } });
-  document.getElementById('todoFullAddBtn').addEventListener('click', ()=>openTodoForm());
-
-  document.querySelectorAll('[data-toggle-todo]').forEach(b=>b.addEventListener('click', async ()=>{
+  document.querySelectorAll('[data-toggle-todo]').forEach(b=>b.addEventListener('click', async (e)=>{
+    e.stopPropagation();
     const t = state.cache.todos.find(x=>x.id===Number(b.dataset.toggleTodo));
     if(!t) return;
     await DB.put('todos', { ...t, completed: !t.completed });
     render();
   }));
-  document.querySelectorAll('[data-edit-todo]').forEach(b=>b.addEventListener('click', ()=>openTodoForm(Number(b.dataset.editTodo))));
-  document.querySelectorAll('[data-del-todo]').forEach(b=>b.addEventListener('click', async ()=>{
-    await DB.delete('todos', Number(b.dataset.delTodo));
-    toast('Task deleted'); render();
-  }));
-  document.querySelectorAll('[data-rollover-todo]').forEach(b=>b.addEventListener('click', ()=>openRolloverModal([Number(b.dataset.rolloverTodo)])));
-
-  document.getElementById('todoNotifBtn')?.addEventListener('click', async ()=>{
-    const granted = await requestNotificationPermission();
-    toast(granted ? 'Browser alerts enabled' : 'Alerts not enabled');
-    render();
-  });
-  document.getElementById('todoExportBtn').addEventListener('click', ()=>openTodoExportModal());
+  document.querySelectorAll('[data-todo-menu]').forEach(b=>b.addEventListener('click', ()=>openTodoRowMenu(Number(b.dataset.todoMenu))));
+  document.getElementById('todoDesktopAdd')?.addEventListener('click', ()=>openTodoForm());
+  document.getElementById('todoDesktopSettings')?.addEventListener('click', ()=>openTodoSettingsModal());
 }
 function openTodoForm(editId){
   const existing = editId ? state.cache.todos.find(t=>t.id===editId) : null;
@@ -2668,7 +2677,11 @@ function confirmResetAll(){
 function initNav(){
   document.querySelectorAll('.nav-item[data-route]').forEach(b=>b.addEventListener('click', ()=>navigate(b.dataset.route)));
   document.getElementById('hamburger').addEventListener('click', ()=>document.getElementById('app').classList.toggle('nav-open'));
-  document.getElementById('topbarAdd').addEventListener('click', ()=>openEventForm({ date: todayISO() }));
+  document.getElementById('topbarAdd').addEventListener('click', ()=>{
+    if(state.route==='todos') openTodoForm();
+    else openEventForm({ date: todayISO() });
+  });
+  document.getElementById('topbarSettings').addEventListener('click', ()=>openTodoSettingsModal());
   document.getElementById('logoutBtn').addEventListener('click', ()=>Auth.signOut());
   window.addEventListener('hashchange', ()=>{
     const r = location.hash.replace('#','') || 'dashboard';
