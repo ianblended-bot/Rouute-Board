@@ -61,14 +61,15 @@ const state = {
   todoViewMode: 'day',
   composeNotes: '',
   composeStep: 'input', // 'input' | 'drafting' | 'result'
+  composeView: 'new', // 'new' | 'saved'
   composeDraft: null, // { subject, body }
   todoViewDate: new Date(),
-  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[] },
+  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[] },
 };
 
 async function refreshCache(){
-  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples] = await Promise.all([
-    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples')
+  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts] = await Promise.all([
+    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples'), DB.getAll('email_drafts')
   ]);
   technicians.sort((a,b)=>a.name.localeCompare(b.name));
   sites.sort((a,b)=>a.name.localeCompare(b.name));
@@ -78,7 +79,8 @@ async function refreshCache(){
   zones.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
   eventTypes.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
   emailVoiceSamples.sort((a,b)=> new Date(a.createdAt) - new Date(b.createdAt));
-  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples };
+  emailDrafts.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)); // newest first
+  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts };
 }
 
 /* ---------------- status / KPI computation ---------------- */
@@ -2196,12 +2198,22 @@ function emailSettingsSummary(s){
   const audience = s.emailAudience === 'other' ? (s.emailAudienceCustom || 'Other') : (EMAIL_AUDIENCES[s.emailAudience] || 'Middle Mgmt');
   return `${style} · ${urgency} · ${audience}`;
 }
+function composeViewToggle(){
+  const count = (state.cache.emailDrafts||[]).length;
+  return `
+  <div class="toolbar"><div class="chip-filter">
+    <button class="chip ${state.composeView==='new'?'active':''}" data-compose-view="new">New</button>
+    <button class="chip ${state.composeView==='saved'?'active':''}" data-compose-view="saved">Saved${count?` (${count})`:''}</button>
+  </div></div>`;
+}
 function renderCompose(){
   const s = state.cache.settings || {};
+  if(state.composeView === 'saved') return renderComposeSavedList();
   if(state.composeStep === 'result' && state.composeDraft) return renderComposeResult(s);
   const drafting = state.composeStep === 'drafting';
   return `
   <div class="view-head"><div><h1>Compose</h1><div class="view-sub">Draft an email in your own voice</div></div></div>
+  ${composeViewToggle()}
   <div class="card card-pad" style="max-width:560px;">
     <div class="field">
       <label>Rough notes</label>
@@ -2219,6 +2231,7 @@ function renderComposeResult(s){
   const d = state.composeDraft;
   return `
   <div class="view-head"><div><h1>Compose</h1><div class="view-sub">Review your draft</div></div></div>
+  ${composeViewToggle()}
   <div class="card card-pad" style="max-width:560px;">
     <div class="todo-meta" style="margin-bottom:14px;">
       <span class="badge badge-neutral">${escapeHTML(EMAIL_STYLES[s.emailStyle]||'Formal')}</span>
@@ -2231,9 +2244,28 @@ function renderComposeResult(s){
       <button class="btn btn-outline" id="composeRegenerateBtn" style="flex:1;justify-content:center;">↻ Regenerate</button>
       <button class="btn btn-outline" id="composeCopyBtn" style="flex:1;justify-content:center;">Copy</button>
     </div>
+    <button class="btn btn-outline" id="composeSaveBtn" style="width:100%;justify-content:center;margin-bottom:10px;">💾 Save draft</button>
     <button class="btn" id="composeMailBtn" style="width:100%;justify-content:center;">✉ Open in Mail</button>
     <button class="btn-link" id="composeBackBtn" style="margin-top:10px;">‹ Back to notes</button>
   </div>
+  `;
+}
+function renderComposeSavedList(){
+  const drafts = state.cache.emailDrafts || [];
+  const rows = drafts.length ? drafts.map(d=>{
+    const snippet = (d.body||'').slice(0,70);
+    return `
+    <div class="watch-row">
+      <div><div class="watch-name">${escapeHTML(d.subject || '(no subject)')}</div><div class="watch-meta">${escapeHTML(snippet)}${(d.body||'').length>70?'…':''} · ${humanDate(toISO(new Date(d.createdAt)))}</div></div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-open-draft="${d.id}">Open</button>
+      <button class="icon-btn" data-del-draft="${d.id}">Delete</button>
+    </div>`;
+  }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No saved drafts yet — save one from the review screen after drafting.</p>`;
+  return `
+  <div class="view-head"><div><h1>Compose</h1><div class="view-sub">Your saved drafts</div></div></div>
+  ${composeViewToggle()}
+  <div class="card" style="padding:4px 8px;max-width:560px;">${rows}</div>
   `;
 }
 async function runComposeDraft(){
@@ -2263,6 +2295,24 @@ async function runComposeDraft(){
   render();
 }
 function mountCompose(){
+  document.querySelectorAll('[data-compose-view]').forEach(b=>b.addEventListener('click', ()=>{ state.composeView = b.dataset.composeView; render(); }));
+
+  if(state.composeView === 'saved'){
+    document.querySelectorAll('[data-open-draft]').forEach(b=>b.addEventListener('click', ()=>{
+      const d = (state.cache.emailDrafts||[]).find(x=>x.id===Number(b.dataset.openDraft));
+      if(!d) return;
+      state.composeDraft = { subject: d.subject, body: d.body };
+      state.composeStep = 'result';
+      state.composeView = 'new';
+      render();
+    }));
+    document.querySelectorAll('[data-del-draft]').forEach(b=>b.addEventListener('click', async ()=>{
+      await DB.delete('email_drafts', Number(b.dataset.delDraft));
+      toast('Draft deleted'); render();
+    }));
+    return;
+  }
+
   if(state.composeStep === 'result'){
     document.getElementById('composeSubject').addEventListener('input', (e)=>{ state.composeDraft.subject = e.target.value; });
     document.getElementById('composeBody').addEventListener('input', (e)=>{ state.composeDraft.body = e.target.value; });
@@ -2271,6 +2321,21 @@ function mountCompose(){
       const text = `Subject: ${state.composeDraft.subject}\n\n${state.composeDraft.body}`;
       try{ await navigator.clipboard.writeText(text); toast('Copied to clipboard'); }
       catch(e){ toast('Could not copy — select the text and copy manually'); }
+    });
+    document.getElementById('composeSaveBtn').addEventListener('click', async ()=>{
+      const s = state.cache.settings || {};
+      await DB.add('email_drafts', {
+        subject: state.composeDraft.subject,
+        body: state.composeDraft.body,
+        style: s.emailStyle || 'formal',
+        urgency: s.emailUrgency || 'not_urgent',
+        audience: s.emailAudience || 'middle_mgmt',
+        audienceCustom: s.emailAudienceCustom || '',
+        notes: state.composeNotes,
+        createdAt: new Date().toISOString(),
+      });
+      await refreshCache();
+      toast('Draft saved');
     });
     document.getElementById('composeMailBtn').addEventListener('click', ()=>{
       const subject = encodeURIComponent(state.composeDraft.subject);
@@ -2838,6 +2903,7 @@ function mountSettings(){
       todos: await DB.getAll('todos'),
       eventTypes: await DB.getAll('event_types'),
       emailVoiceSamples: await DB.getAll('email_voice_samples'),
+      emailDrafts: await DB.getAll('email_drafts'),
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
@@ -2884,6 +2950,7 @@ function confirmResetAll(){
     await DB.clear('huddle_attendance');
     await DB.clear('fleetcheck_records');
     await DB.clear('email_voice_samples');
+    await DB.clear('email_drafts');
     await seedIfEmpty();
     closeModal(); toast('All data reset');
     state.weekStart = mondayOf(new Date());
