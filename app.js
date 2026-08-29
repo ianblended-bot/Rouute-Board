@@ -37,6 +37,8 @@ function renderZoneKeySidebar(){
 }
 /* ---------------- event type metadata (dynamic — see Settings > Event types) ---------------- */
 const FALLBACK_EVENT_TYPE = { key:'other', label:'Other / admin', short:'Other', color:'#2C6E8C', isSystem:true };
+const EMAIL_STYLES = { formal:'Formal', relaxed:'Relaxed', friendly:'Friendly' };
+const EMAIL_AUDIENCES = { slt:'SLT', smt:'SMT', middle_mgmt:'Middle Mgmt', my_team:'My Team', client:'Client', supplier:'Supplier', other:'Other' };
 function eventTypeList(){ return state.cache.eventTypes || []; }
 function eventTypeByKey(key){
   return eventTypeList().find(t=>t.key===key) || FALLBACK_EVENT_TYPE;
@@ -57,13 +59,16 @@ const state = {
   reportsRange: 'month',
   todoFilter: 'open',
   todoViewMode: 'day',
+  composeNotes: '',
+  composeStep: 'input', // 'input' | 'drafting' | 'result'
+  composeDraft: null, // { subject, body }
   todoViewDate: new Date(),
-  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[] },
+  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[] },
 };
 
 async function refreshCache(){
-  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes] = await Promise.all([
-    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types')
+  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples] = await Promise.all([
+    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples')
   ]);
   technicians.sort((a,b)=>a.name.localeCompare(b.name));
   sites.sort((a,b)=>a.name.localeCompare(b.name));
@@ -72,7 +77,8 @@ async function refreshCache(){
   todos.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)); // newest first
   zones.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
   eventTypes.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
-  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes };
+  emailVoiceSamples.sort((a,b)=> new Date(a.createdAt) - new Date(b.createdAt));
+  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples };
 }
 
 /* ---------------- status / KPI computation ---------------- */
@@ -182,7 +188,7 @@ function showModal(titleHTML, bodyHTML, footHTML, opts){
 function closeModal(){ document.getElementById('modalBackdrop').hidden = true; }
 
 /* ---------------- routing ---------------- */
-const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', reports:'Reports', search:'Search', settings:'Settings' };
+const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', compose:'Compose', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', reports:'Reports', search:'Search', settings:'Settings' };
 
 function navigate(route){
   state.route = route;
@@ -190,7 +196,8 @@ function navigate(route){
   document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active', b.dataset.route===route));
   document.getElementById('topbarTitle').textContent = ROUTE_TITLES[route] || '';
   document.getElementById('app').classList.remove('nav-open');
-  document.getElementById('topbarSettings').hidden = route !== 'todos';
+  document.getElementById('topbarSettings').hidden = !(route === 'todos' || route === 'compose');
+  document.getElementById('topbarAdd').hidden = route === 'compose';
   render();
 }
 
@@ -205,6 +212,7 @@ async function render(){
   switch(state.route){
     case 'dashboard': main.innerHTML = renderDashboard(); mountDashboard(); break;
     case 'todos': main.innerHTML = renderTodos(); mountTodos(); break;
+    case 'compose': main.innerHTML = renderCompose(); mountCompose(); break;
     case 'schedule': main.innerHTML = renderSchedule(); mountSchedule(); break;
     case 'technicians': main.innerHTML = renderTechnicians(); mountTechnicians(); break;
     case 'sites': main.innerHTML = renderSites(); mountSites(); break;
@@ -2181,6 +2189,188 @@ async function checkTodoAlerts(){
   if(!modalOpen && (state.route==='dashboard' || state.route==='todos')) render();
 }
 
+/* ================= COMPOSE (smart email) ================= */
+function emailSettingsSummary(s){
+  const style = EMAIL_STYLES[s.emailStyle] || 'Formal';
+  const urgency = s.emailUrgency === 'urgent' ? 'Urgent' : 'Not urgent';
+  const audience = s.emailAudience === 'other' ? (s.emailAudienceCustom || 'Other') : (EMAIL_AUDIENCES[s.emailAudience] || 'Middle Mgmt');
+  return `${style} · ${urgency} · ${audience}`;
+}
+function renderCompose(){
+  const s = state.cache.settings || {};
+  if(state.composeStep === 'result' && state.composeDraft) return renderComposeResult(s);
+  const drafting = state.composeStep === 'drafting';
+  return `
+  <div class="view-head"><div><h1>Compose</h1><div class="view-sub">Draft an email in your own voice</div></div></div>
+  <div class="card card-pad" style="max-width:560px;">
+    <div class="field">
+      <label>Rough notes</label>
+      <textarea id="composeNotes" placeholder="What do you need to say?" style="min-height:110px;" ${drafting?'disabled':''}>${escapeHTML(state.composeNotes)}</textarea>
+      <div class="freq-hint">Type it, or tap your keyboard's dictation mic — rough is fine.</div>
+    </div>
+    <button class="btn btn-outline" id="composeSettingsSummary" style="width:100%;justify-content:space-between;margin-bottom:16px;" ${drafting?'disabled':''}>
+      <span>${escapeHTML(emailSettingsSummary(s))}</span><span>Change ›</span>
+    </button>
+    <button class="btn" id="composeDraftBtn" style="width:100%;justify-content:center;" ${drafting?'disabled':''}>${drafting?'Drafting…':'Draft email'}</button>
+  </div>
+  `;
+}
+function renderComposeResult(s){
+  const d = state.composeDraft;
+  return `
+  <div class="view-head"><div><h1>Compose</h1><div class="view-sub">Review your draft</div></div></div>
+  <div class="card card-pad" style="max-width:560px;">
+    <div class="todo-meta" style="margin-bottom:14px;">
+      <span class="badge badge-neutral">${escapeHTML(EMAIL_STYLES[s.emailStyle]||'Formal')}</span>
+      <span class="badge ${s.emailUrgency==='urgent'?'badge-overdue':'badge-neutral'}">${s.emailUrgency==='urgent'?'Urgent':'Not urgent'}</span>
+      <span class="badge badge-neutral">${escapeHTML(s.emailAudience==='other'?(s.emailAudienceCustom||'Other'):(EMAIL_AUDIENCES[s.emailAudience]||'Middle Mgmt'))}</span>
+    </div>
+    <div class="field"><label>Subject</label><input id="composeSubject" value="${escapeHTML(d.subject)}"></div>
+    <div class="field"><label>Body</label><textarea id="composeBody" style="min-height:220px;">${escapeHTML(d.body)}</textarea></div>
+    <div style="display:flex;gap:8px;margin-bottom:10px;">
+      <button class="btn btn-outline" id="composeRegenerateBtn" style="flex:1;justify-content:center;">↻ Regenerate</button>
+      <button class="btn btn-outline" id="composeCopyBtn" style="flex:1;justify-content:center;">Copy</button>
+    </div>
+    <button class="btn" id="composeMailBtn" style="width:100%;justify-content:center;">✉ Open in Mail</button>
+    <button class="btn-link" id="composeBackBtn" style="margin-top:10px;">‹ Back to notes</button>
+  </div>
+  `;
+}
+async function runComposeDraft(){
+  const notesEl = document.getElementById('composeNotes');
+  const notes = (notesEl ? notesEl.value : state.composeNotes).trim();
+  if(!notes){ toast('Add some notes first'); return; }
+  state.composeNotes = notes;
+  state.composeStep = 'drafting';
+  render();
+  const s = state.cache.settings || {};
+  try{
+    const examples = (state.cache.emailVoiceSamples||[]).map(e=>e.content);
+    const result = await draftEmail({
+      notes,
+      style: s.emailStyle || 'formal',
+      urgency: s.emailUrgency || 'not_urgent',
+      audience: s.emailAudience || 'middle_mgmt',
+      audienceCustom: s.emailAudienceCustom || '',
+      examples,
+    });
+    state.composeDraft = { subject: result.subject || '', body: result.body || '' };
+    state.composeStep = 'result';
+  } catch(e){
+    toast(e?.message || 'Could not draft the email — check your connection and try again');
+    state.composeStep = 'input';
+  }
+  render();
+}
+function mountCompose(){
+  if(state.composeStep === 'result'){
+    document.getElementById('composeSubject').addEventListener('input', (e)=>{ state.composeDraft.subject = e.target.value; });
+    document.getElementById('composeBody').addEventListener('input', (e)=>{ state.composeDraft.body = e.target.value; });
+    document.getElementById('composeRegenerateBtn').addEventListener('click', ()=>runComposeDraft());
+    document.getElementById('composeCopyBtn').addEventListener('click', async ()=>{
+      const text = `Subject: ${state.composeDraft.subject}\n\n${state.composeDraft.body}`;
+      try{ await navigator.clipboard.writeText(text); toast('Copied to clipboard'); }
+      catch(e){ toast('Could not copy — select the text and copy manually'); }
+    });
+    document.getElementById('composeMailBtn').addEventListener('click', ()=>{
+      const subject = encodeURIComponent(state.composeDraft.subject);
+      const body = encodeURIComponent(state.composeDraft.body);
+      window.location.href = `mailto:?subject=${subject}&body=${body}`;
+    });
+    document.getElementById('composeBackBtn').addEventListener('click', ()=>{ state.composeStep = 'input'; render(); });
+    return;
+  }
+  document.getElementById('composeNotes')?.addEventListener('input', (e)=>{ state.composeNotes = e.target.value; });
+  document.getElementById('composeSettingsSummary')?.addEventListener('click', ()=>openEmailSettingsModal());
+  document.getElementById('composeDraftBtn')?.addEventListener('click', ()=>runComposeDraft());
+}
+function openEmailSettingsModal(){
+  const s = state.cache.settings || {};
+  const body = `
+    <div class="field">
+      <label>Style</label>
+      <div class="chip-filter">
+        ${Object.entries(EMAIL_STYLES).map(([k,label])=>`<button class="chip ${s.emailStyle===k?'active':''}" data-email-style="${k}">${label}</button>`).join('')}
+      </div>
+    </div>
+    <div class="field">
+      <label>Urgency</label>
+      <div class="chip-filter">
+        <button class="chip ${s.emailUrgency!=='urgent'?'active':''}" data-email-urgency="not_urgent">Not urgent</button>
+        <button class="chip ${s.emailUrgency==='urgent'?'active':''}" data-email-urgency="urgent">Urgent</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>Who's this to</label>
+      <div class="chip-filter">
+        ${Object.entries(EMAIL_AUDIENCES).map(([k,label])=>`<button class="chip ${s.emailAudience===k?'active':''}" data-email-audience="${k}">${label}${k==='other'?'…':''}</button>`).join('')}
+      </div>
+      <div id="emailAudienceCustomWrap" style="display:${s.emailAudience==='other'?'':'none'};margin-top:8px;">
+        <input id="emailAudienceCustom" value="${escapeHTML(s.emailAudienceCustom||'')}" placeholder="e.g. IT department, Acme Corp…">
+      </div>
+    </div>
+  `;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn" id="emailSettingsDone">Done</button></div>`;
+  showModal('Email settings', body, foot);
+
+  async function updateSetting(patch){
+    const current = state.cache.settings || {};
+    await DB.put('settings', { id:'settings', ...current, ...patch });
+    await refreshCache();
+  }
+  document.querySelectorAll('[data-email-style]').forEach(b=>b.addEventListener('click', async ()=>{
+    document.querySelectorAll('[data-email-style]').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    await updateSetting({ emailStyle: b.dataset.emailStyle });
+  }));
+  document.querySelectorAll('[data-email-urgency]').forEach(b=>b.addEventListener('click', async ()=>{
+    document.querySelectorAll('[data-email-urgency]').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    await updateSetting({ emailUrgency: b.dataset.emailUrgency });
+  }));
+  document.querySelectorAll('[data-email-audience]').forEach(b=>b.addEventListener('click', async ()=>{
+    document.querySelectorAll('[data-email-audience]').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    const key = b.dataset.emailAudience;
+    await updateSetting({ emailAudience: key });
+    const wrap = document.getElementById('emailAudienceCustomWrap');
+    if(wrap) wrap.style.display = key==='other' ? '' : 'none';
+  }));
+  document.getElementById('emailAudienceCustom')?.addEventListener('change', async (e)=>{
+    await updateSetting({ emailAudienceCustom: e.target.value });
+  });
+  document.getElementById('emailSettingsDone').addEventListener('click', ()=>{ closeModal(); render(); });
+}
+function openEmailSampleForm(editId){
+  const existing = editId ? (state.cache.emailVoiceSamples||[]).find(e=>e.id===editId) : null;
+  const v = existing || { label:'', content:'' };
+  const body = `
+    <div class="field"><label>Label (optional)</label><input id="esLabel" value="${escapeHTML(v.label)}" placeholder="e.g. Update to client, Team announcement…"></div>
+    <div class="field"><label>Email text</label><textarea id="esContent" style="min-height:160px;" placeholder="Paste a real email you've sent…">${escapeHTML(v.content)}</textarea></div>
+  `;
+  const foot = `
+    ${existing ? `<button class="btn btn-danger" id="esDelete">Remove</button>` : `<span></span>`}
+    <div class="modal-foot-right"><button class="btn btn-outline" id="esCancel">Cancel</button><button class="btn" id="esSave">${existing?'Save':'Add'}</button></div>
+  `;
+  showModal(existing?'Edit example email':'Add example email', body, foot);
+  document.getElementById('esCancel').addEventListener('click', closeModal);
+  document.getElementById('esDelete')?.addEventListener('click', async ()=>{
+    await DB.delete('email_voice_samples', editId);
+    closeModal(); toast('Example removed'); render();
+  });
+  document.getElementById('esSave').addEventListener('click', async ()=>{
+    const content = document.getElementById('esContent').value.trim();
+    if(!content){ toast('Paste an example email first'); return; }
+    const label = document.getElementById('esLabel').value.trim();
+    if(existing){
+      await DB.put('email_voice_samples', { ...existing, label, content });
+    } else {
+      await DB.add('email_voice_samples', { label, content, createdAt: new Date().toISOString() });
+    }
+    closeModal(); toast(existing?'Example updated':'Example added'); render();
+  });
+}
+
 /* ================= SEARCH ================= */
 const EVENT_TYPE_FILTERS = [['all','All types'],['techVisit','Tech visits'],['qaVisit','QA visits'],['oneOnOne','1-1s'],['wfh','WFH'],['leave','Leave'],['other','Other']];
 const TIME_FILTERS = [['all','All time'],['week','This week'],['month','This month'],['missed','Missed / unconfirmed'],['upcoming','Upcoming']];
@@ -2338,6 +2528,14 @@ function renderSettings(){
       <button class="icon-btn" data-del-block="${b.id}">Remove</button>
     </div>`;
   }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No recurring blocks yet.</p>`;
+  const emailSamples = state.cache.emailVoiceSamples || [];
+  const emailSampleRows = emailSamples.length ? emailSamples.map(e=>`
+    <div class="watch-row">
+      <div><div class="watch-name">${escapeHTML(e.label || 'Untitled example')}</div><div class="watch-meta">${escapeHTML(e.content.slice(0,60))}${e.content.length>60?'…':''}</div></div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-edit-sample="${e.id}">Edit</button>
+      <button class="icon-btn" data-del-sample="${e.id}">Remove</button>
+    </div>`).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No examples yet — add a few real emails you've sent so drafts sound like you.</p>`;
   const eventTypeRows = eventTypeList().length ? eventTypeList().map(t=>{
     const usageCount = state.cache.events.filter(e=>e.type===t.key).length;
     return `
@@ -2381,6 +2579,12 @@ function renderSettings(){
     <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Weekly commitments like Teams huddles or an extra WFH day. These appear on the board automatically every week but don't stop tech/QA visits being booked alongside them.</p>
     <div id="blockList">${blockRows}</div>
     <button class="btn btn-outline btn-small" id="addBlockBtn" style="margin-top:8px;">+ Add recurring block</button>
+  </div>
+  <div class="card card-pad" style="max-width:480px;margin-top:16px;">
+    <h3 style="margin-bottom:4px;">Email voice</h3>
+    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Paste in a few real emails you've sent — Compose uses these to match your natural tone and phrasing when drafting new ones. Set up once, update occasionally.</p>
+    <div id="emailSampleList">${emailSampleRows}</div>
+    <button class="btn btn-outline btn-small" id="addEmailSampleBtn" style="margin-top:8px;">+ Add example email</button>
   </div>
   <div class="card card-pad" style="max-width:480px;margin-top:16px;">
     <h3 style="margin-bottom:8px;">Data</h3>
@@ -2615,6 +2819,12 @@ function mountSettings(){
   document.querySelectorAll('[data-edit-block]').forEach(b=>b.addEventListener('click', ()=>openBlockForm(Number(b.dataset.editBlock))));
   document.querySelectorAll('[data-clear-block]').forEach(b=>b.addEventListener('click', ()=>openBlockCleanup(Number(b.dataset.clearBlock), false)));
   document.querySelectorAll('[data-del-block]').forEach(b=>b.addEventListener('click', ()=>openBlockCleanup(Number(b.dataset.delBlock), true)));
+  document.getElementById('addEmailSampleBtn').addEventListener('click', ()=>openEmailSampleForm());
+  document.querySelectorAll('[data-edit-sample]').forEach(b=>b.addEventListener('click', ()=>openEmailSampleForm(Number(b.dataset.editSample))));
+  document.querySelectorAll('[data-del-sample]').forEach(b=>b.addEventListener('click', async ()=>{
+    await DB.delete('email_voice_samples', Number(b.dataset.delSample));
+    toast('Example removed'); render();
+  }));
   document.getElementById('exportBtn').addEventListener('click', async ()=>{
     const data = {
       technicians: await DB.getAll('technicians'),
@@ -2626,6 +2836,8 @@ function mountSettings(){
       huddleAttendance: await DB.getAll('huddle_attendance'),
       fleetcheckRecords: await DB.getAll('fleetcheck_records'),
       todos: await DB.getAll('todos'),
+      eventTypes: await DB.getAll('event_types'),
+      emailVoiceSamples: await DB.getAll('email_voice_samples'),
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
@@ -2666,6 +2878,12 @@ function confirmResetAll(){
     await DB.clear('events');
     await DB.clear('settings');
     await DB.clear('recurring_blocks');
+    await DB.clear('zones');
+    await DB.clear('event_types');
+    await DB.clear('todos');
+    await DB.clear('huddle_attendance');
+    await DB.clear('fleetcheck_records');
+    await DB.clear('email_voice_samples');
     await seedIfEmpty();
     closeModal(); toast('All data reset');
     state.weekStart = mondayOf(new Date());
@@ -2681,7 +2899,10 @@ function initNav(){
     if(state.route==='todos') openTodoForm();
     else openEventForm({ date: todayISO() });
   });
-  document.getElementById('topbarSettings').addEventListener('click', ()=>openTodoSettingsModal());
+  document.getElementById('topbarSettings').addEventListener('click', ()=>{
+    if(state.route==='compose') openEmailSettingsModal();
+    else openTodoSettingsModal();
+  });
   document.getElementById('logoutBtn').addEventListener('click', ()=>Auth.signOut());
   window.addEventListener('hashchange', ()=>{
     const r = location.hash.replace('#','') || 'dashboard';

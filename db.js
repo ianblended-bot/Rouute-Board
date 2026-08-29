@@ -134,6 +134,10 @@ const DEFAULT_SETTINGS = {
   qaVisitsPerWeekMin: 4,
   oneOnOnesPerWeekMax: 3,
   wfhWeekday: 3,
+  emailStyle: 'formal',
+  emailUrgency: 'not_urgent',
+  emailAudience: 'middle_mgmt',
+  emailAudienceCustom: '',
 };
 
 const SEED_ZONES = [
@@ -192,4 +196,14 @@ async function seedIfEmpty(){
   if(!settings){
     await DB.put('settings', { ...DEFAULT_SETTINGS });
   }
+}
+
+/* ---------- draft-email Edge Function ---------- */
+async function draftEmail({ notes, style, urgency, audience, audienceCustom, examples }){
+  const { data, error } = await sb.functions.invoke('draft-email', {
+    body: { notes, style, urgency, audience, audienceCustom, examples },
+  });
+  if(error) throw error;
+  if(data?.error) throw new Error(data.error);
+  return data; // { subject, body }
 }
