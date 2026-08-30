@@ -447,4 +447,6 @@ tbody tr:hover{ background:var(--paper-dim); }
   /* on mobile the topbar's + and ⋯ icons replace these — avoid showing both */
   #todoViewActions{ display:none; }
   #todoViewHead{ margin-bottom:0; }
+  #composeViewActions{ display:none; }
+  #composeViewHead{ margin-bottom:0; }
 }

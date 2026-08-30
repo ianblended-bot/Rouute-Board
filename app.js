@@ -2197,12 +2197,26 @@ function emailSettingsSummary(s){
   const audience = s.emailAudience === 'other' ? (s.emailAudienceCustom || 'Other') : (EMAIL_AUDIENCES[s.emailAudience] || 'Middle Mgmt');
   return `${style} · ${urgency} · ${audience}`;
 }
+function composeDesktopHeader(){
+  // Desktop has no mobile topbar to hold the + / ⋯ icons, so this gives desktop
+  // the same two persistent actions, visible on every Compose screen (input,
+  // review, and saved list) — hidden on mobile via CSS, where the topbar covers it.
+  return `
+  <div class="view-head" id="composeViewHead">
+    <div></div>
+    <div class="view-actions" id="composeViewActions">
+      <button class="btn btn-outline" id="composeDesktopSettings">⋯ Settings</button>
+      <button class="btn" id="composeDesktopNew">+ Compose</button>
+    </div>
+  </div>`;
+}
 function renderCompose(){
   const s = state.cache.settings || {};
   if(state.composeView === 'saved') return renderComposeSavedList();
   if(state.composeStep === 'result' && state.composeDraft) return renderComposeResult(s);
   const drafting = state.composeStep === 'drafting';
   return `
+  ${composeDesktopHeader()}
   <div class="card card-pad" style="max-width:560px;">
     <div class="field">
       <label>Rough notes</label>
@@ -2217,6 +2231,7 @@ function renderCompose(){
 function renderComposeResult(s){
   const d = state.composeDraft;
   return `
+  ${composeDesktopHeader()}
   <div class="card card-pad" style="max-width:560px;">
     <div class="todo-meta" style="margin-bottom:14px;">
       <span class="badge badge-neutral">${escapeHTML(EMAIL_STYLES[s.emailStyle]||'Formal')}</span>
@@ -2248,6 +2263,7 @@ function renderComposeSavedList(){
     </div>`;
   }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No saved drafts yet — save one from the review screen after drafting.</p>`;
   return `
+  ${composeDesktopHeader()}
   <div class="card" style="padding:4px 8px;max-width:560px;">${rows}</div>
   `;
 }
@@ -2279,6 +2295,15 @@ async function runComposeDraft(){
   render();
 }
 function mountCompose(){
+  document.getElementById('composeDesktopSettings')?.addEventListener('click', ()=>openEmailSettingsModal());
+  document.getElementById('composeDesktopNew')?.addEventListener('click', ()=>{
+    state.composeNotes = '';
+    state.composeDraft = null;
+    state.composeStep = 'input';
+    state.composeView = 'new';
+    render();
+  });
+
   if(state.composeView === 'saved'){
     document.querySelectorAll('[data-open-draft]').forEach(b=>b.addEventListener('click', ()=>{
       const d = (state.cache.emailDrafts||[]).find(x=>x.id===Number(b.dataset.openDraft));
@@ -2304,21 +2329,29 @@ function mountCompose(){
       try{ await navigator.clipboard.writeText(text); toast('Copied to clipboard'); }
       catch(e){ toast('Could not copy — select the text and copy manually'); }
     });
-    document.getElementById('composeSaveBtn').addEventListener('click', async ()=>{
-      const s = state.cache.settings || {};
-      await DB.add('email_drafts', {
-        subject: state.composeDraft.subject,
-        body: state.composeDraft.body,
-        style: s.emailStyle || 'formal',
-        urgency: s.emailUrgency || 'not_urgent',
-        urgencyCustom: s.emailUrgencyCustom || '',
-        audience: s.emailAudience || 'middle_mgmt',
-        audienceCustom: s.emailAudienceCustom || '',
-        notes: state.composeNotes,
-        createdAt: new Date().toISOString(),
-      });
-      await refreshCache();
-      toast('Draft saved');
+    document.getElementById('composeSaveBtn').addEventListener('click', async (e)=>{
+      const btn = e.currentTarget;
+      const originalLabel = btn.textContent;
+      try{
+        const s = state.cache.settings || {};
+        await DB.add('email_drafts', {
+          subject: state.composeDraft.subject,
+          body: state.composeDraft.body,
+          style: s.emailStyle || 'formal',
+          urgency: s.emailUrgency || 'not_urgent',
+          urgencyCustom: s.emailUrgencyCustom || '',
+          audience: s.emailAudience || 'middle_mgmt',
+          audienceCustom: s.emailAudienceCustom || '',
+          notes: state.composeNotes,
+          createdAt: new Date().toISOString(),
+        });
+        await refreshCache();
+        toast('Draft saved');
+        btn.textContent = '✓ Saved';
+        setTimeout(()=>{ if(btn.isConnected) btn.textContent = originalLabel; }, 1600);
+      } catch(err){
+        toast(`Could not save the draft — ${err?.message || 'please try again'}`);
+      }
     });
     document.getElementById('composeMailBtn').addEventListener('click', ()=>{
       const subject = encodeURIComponent(state.composeDraft.subject);
