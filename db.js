@@ -136,6 +136,7 @@ const DEFAULT_SETTINGS = {
   wfhWeekday: 3,
   emailStyle: 'formal',
   emailUrgency: 'not_urgent',
+  emailUrgencyCustom: '',
   emailAudience: 'middle_mgmt',
   emailAudienceCustom: '',
 };
@@ -199,9 +200,9 @@ async function seedIfEmpty(){
 }
 
 /* ---------- draft-email Edge Function ---------- */
-async function draftEmail({ notes, style, urgency, audience, audienceCustom, examples }){
+async function draftEmail({ notes, style, urgency, urgencyCustom, audience, audienceCustom, examples }){
   const { data, error } = await sb.functions.invoke('draft-email', {
-    body: { notes, style, urgency, audience, audienceCustom, examples },
+    body: { notes, style, urgency, urgencyCustom, audience, audienceCustom, examples },
   });
   if(error) throw error;
   if(data?.error) throw new Error(data.error);

@@ -199,7 +199,6 @@ function navigate(route){
   document.getElementById('topbarTitle').textContent = ROUTE_TITLES[route] || '';
   document.getElementById('app').classList.remove('nav-open');
   document.getElementById('topbarSettings').hidden = !(route === 'todos' || route === 'compose');
-  document.getElementById('topbarAdd').hidden = route === 'compose';
   render();
 }
 
@@ -2194,17 +2193,9 @@ async function checkTodoAlerts(){
 /* ================= COMPOSE (smart email) ================= */
 function emailSettingsSummary(s){
   const style = EMAIL_STYLES[s.emailStyle] || 'Formal';
-  const urgency = s.emailUrgency === 'urgent' ? 'Urgent' : 'Not urgent';
+  const urgency = s.emailUrgency === 'other' ? (s.emailUrgencyCustom || 'Other') : (s.emailUrgency === 'urgent' ? 'Urgent' : 'Not urgent');
   const audience = s.emailAudience === 'other' ? (s.emailAudienceCustom || 'Other') : (EMAIL_AUDIENCES[s.emailAudience] || 'Middle Mgmt');
   return `${style} · ${urgency} · ${audience}`;
-}
-function composeViewToggle(){
-  const count = (state.cache.emailDrafts||[]).length;
-  return `
-  <div class="toolbar"><div class="chip-filter">
-    <button class="chip ${state.composeView==='new'?'active':''}" data-compose-view="new">New</button>
-    <button class="chip ${state.composeView==='saved'?'active':''}" data-compose-view="saved">Saved${count?` (${count})`:''}</button>
-  </div></div>`;
 }
 function renderCompose(){
   const s = state.cache.settings || {};
@@ -2212,17 +2203,13 @@ function renderCompose(){
   if(state.composeStep === 'result' && state.composeDraft) return renderComposeResult(s);
   const drafting = state.composeStep === 'drafting';
   return `
-  <div class="view-head"><div><h1>Compose</h1><div class="view-sub">Draft an email in your own voice</div></div></div>
-  ${composeViewToggle()}
   <div class="card card-pad" style="max-width:560px;">
     <div class="field">
       <label>Rough notes</label>
       <textarea id="composeNotes" placeholder="What do you need to say?" style="min-height:110px;" ${drafting?'disabled':''}>${escapeHTML(state.composeNotes)}</textarea>
       <div class="freq-hint">Type it, or tap your keyboard's dictation mic — rough is fine.</div>
     </div>
-    <button class="btn btn-outline" id="composeSettingsSummary" style="width:100%;justify-content:space-between;margin-bottom:16px;" ${drafting?'disabled':''}>
-      <span>${escapeHTML(emailSettingsSummary(s))}</span><span>Change ›</span>
-    </button>
+    <button class="btn btn-outline" id="composeSettingsSummary" style="width:100%;justify-content:center;margin-bottom:16px;" ${drafting?'disabled':''}>Email Settings</button>
     <button class="btn" id="composeDraftBtn" style="width:100%;justify-content:center;" ${drafting?'disabled':''}>${drafting?'Drafting…':'Draft email'}</button>
   </div>
   `;
@@ -2230,12 +2217,10 @@ function renderCompose(){
 function renderComposeResult(s){
   const d = state.composeDraft;
   return `
-  <div class="view-head"><div><h1>Compose</h1><div class="view-sub">Review your draft</div></div></div>
-  ${composeViewToggle()}
   <div class="card card-pad" style="max-width:560px;">
     <div class="todo-meta" style="margin-bottom:14px;">
       <span class="badge badge-neutral">${escapeHTML(EMAIL_STYLES[s.emailStyle]||'Formal')}</span>
-      <span class="badge ${s.emailUrgency==='urgent'?'badge-overdue':'badge-neutral'}">${s.emailUrgency==='urgent'?'Urgent':'Not urgent'}</span>
+      <span class="badge ${s.emailUrgency==='urgent'?'badge-overdue':'badge-neutral'}">${s.emailUrgency==='other'?escapeHTML(s.emailUrgencyCustom||'Other'):(s.emailUrgency==='urgent'?'Urgent':'Not urgent')}</span>
       <span class="badge badge-neutral">${escapeHTML(s.emailAudience==='other'?(s.emailAudienceCustom||'Other'):(EMAIL_AUDIENCES[s.emailAudience]||'Middle Mgmt'))}</span>
     </div>
     <div class="field"><label>Subject</label><input id="composeSubject" value="${escapeHTML(d.subject)}"></div>
@@ -2263,8 +2248,6 @@ function renderComposeSavedList(){
     </div>`;
   }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No saved drafts yet — save one from the review screen after drafting.</p>`;
   return `
-  <div class="view-head"><div><h1>Compose</h1><div class="view-sub">Your saved drafts</div></div></div>
-  ${composeViewToggle()}
   <div class="card" style="padding:4px 8px;max-width:560px;">${rows}</div>
   `;
 }
@@ -2282,6 +2265,7 @@ async function runComposeDraft(){
       notes,
       style: s.emailStyle || 'formal',
       urgency: s.emailUrgency || 'not_urgent',
+      urgencyCustom: s.emailUrgencyCustom || '',
       audience: s.emailAudience || 'middle_mgmt',
       audienceCustom: s.emailAudienceCustom || '',
       examples,
@@ -2295,8 +2279,6 @@ async function runComposeDraft(){
   render();
 }
 function mountCompose(){
-  document.querySelectorAll('[data-compose-view]').forEach(b=>b.addEventListener('click', ()=>{ state.composeView = b.dataset.composeView; render(); }));
-
   if(state.composeView === 'saved'){
     document.querySelectorAll('[data-open-draft]').forEach(b=>b.addEventListener('click', ()=>{
       const d = (state.cache.emailDrafts||[]).find(x=>x.id===Number(b.dataset.openDraft));
@@ -2329,6 +2311,7 @@ function mountCompose(){
         body: state.composeDraft.body,
         style: s.emailStyle || 'formal',
         urgency: s.emailUrgency || 'not_urgent',
+        urgencyCustom: s.emailUrgencyCustom || '',
         audience: s.emailAudience || 'middle_mgmt',
         audienceCustom: s.emailAudienceCustom || '',
         notes: state.composeNotes,
@@ -2351,7 +2334,16 @@ function mountCompose(){
 }
 function openEmailSettingsModal(){
   const s = state.cache.settings || {};
+  const draftsCount = (state.cache.emailDrafts||[]).length;
   const body = `
+    <div class="field">
+      <label>View</label>
+      <div class="chip-filter">
+        <button class="chip ${state.composeView==='new'?'active':''}" data-compose-view="new">Compose</button>
+        <button class="chip ${state.composeView==='saved'?'active':''}" data-compose-view="saved">Saved${draftsCount?` (${draftsCount})`:''}</button>
+        <button class="chip" id="emailClearTextBtn">Clear text</button>
+      </div>
+    </div>
     <div class="field">
       <label>Style</label>
       <div class="chip-filter">
@@ -2361,8 +2353,12 @@ function openEmailSettingsModal(){
     <div class="field">
       <label>Urgency</label>
       <div class="chip-filter">
-        <button class="chip ${s.emailUrgency!=='urgent'?'active':''}" data-email-urgency="not_urgent">Not urgent</button>
+        <button class="chip ${(!s.emailUrgency||s.emailUrgency==='not_urgent')?'active':''}" data-email-urgency="not_urgent">Not urgent</button>
         <button class="chip ${s.emailUrgency==='urgent'?'active':''}" data-email-urgency="urgent">Urgent</button>
+        <button class="chip ${s.emailUrgency==='other'?'active':''}" data-email-urgency="other">Other…</button>
+      </div>
+      <div id="emailUrgencyCustomWrap" style="display:${s.emailUrgency==='other'?'':'none'};margin-top:8px;">
+        <input id="emailUrgencyCustom" value="${escapeHTML(s.emailUrgencyCustom||'')}" placeholder="e.g. Needed by Friday, somewhat time-sensitive…">
       </div>
     </div>
     <div class="field">
@@ -2391,8 +2387,14 @@ function openEmailSettingsModal(){
   document.querySelectorAll('[data-email-urgency]').forEach(b=>b.addEventListener('click', async ()=>{
     document.querySelectorAll('[data-email-urgency]').forEach(x=>x.classList.remove('active'));
     b.classList.add('active');
-    await updateSetting({ emailUrgency: b.dataset.emailUrgency });
+    const key = b.dataset.emailUrgency;
+    await updateSetting({ emailUrgency: key });
+    const wrap = document.getElementById('emailUrgencyCustomWrap');
+    if(wrap) wrap.style.display = key==='other' ? '' : 'none';
   }));
+  document.getElementById('emailUrgencyCustom')?.addEventListener('change', async (e)=>{
+    await updateSetting({ emailUrgencyCustom: e.target.value });
+  });
   document.querySelectorAll('[data-email-audience]').forEach(b=>b.addEventListener('click', async ()=>{
     document.querySelectorAll('[data-email-audience]').forEach(x=>x.classList.remove('active'));
     b.classList.add('active');
@@ -2403,6 +2405,19 @@ function openEmailSettingsModal(){
   }));
   document.getElementById('emailAudienceCustom')?.addEventListener('change', async (e)=>{
     await updateSetting({ emailAudienceCustom: e.target.value });
+  });
+  document.querySelectorAll('[data-compose-view]').forEach(b=>b.addEventListener('click', ()=>{
+    state.composeView = b.dataset.composeView;
+    closeModal();
+    render();
+  }));
+  document.getElementById('emailClearTextBtn').addEventListener('click', ()=>{
+    state.composeNotes = '';
+    state.composeDraft = null;
+    state.composeStep = 'input';
+    state.composeView = 'new';
+    closeModal();
+    render();
   });
   document.getElementById('emailSettingsDone').addEventListener('click', ()=>{ closeModal(); render(); });
 }
@@ -2964,6 +2979,13 @@ function initNav(){
   document.getElementById('hamburger').addEventListener('click', ()=>document.getElementById('app').classList.toggle('nav-open'));
   document.getElementById('topbarAdd').addEventListener('click', ()=>{
     if(state.route==='todos') openTodoForm();
+    else if(state.route==='compose'){
+      state.composeNotes = '';
+      state.composeDraft = null;
+      state.composeStep = 'input';
+      state.composeView = 'new';
+      render();
+    }
     else openEventForm({ date: todayISO() });
   });
   document.getElementById('topbarSettings').addEventListener('click', ()=>{
