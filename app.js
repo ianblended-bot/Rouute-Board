@@ -63,13 +63,20 @@ const state = {
   composeStep: 'input', // 'input' | 'drafting' | 'result'
   composeView: 'new', // 'new' | 'saved'
   composeDraft: null, // { subject, body }
+  composeReplyContext: '', // original analysed text, when arriving via "Draft a reply"
+  assistantText: '',
+  assistantInstruction: '',
+  assistantFiles: [], // [{ name, kind: 'pdf'|'image'|'text', data/mediaType or extractedText }]
+  assistantStep: 'input', // 'input' | 'analysing' | 'result'
+  assistantResult: null, // { summary, actionPoints }
+  assistantView: 'new', // 'new' | 'saved'
   todoViewDate: new Date(),
-  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[] },
+  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[] },
 };
 
 async function refreshCache(){
-  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts] = await Promise.all([
-    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples'), DB.getAll('email_drafts')
+  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses] = await Promise.all([
+    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples'), DB.getAll('email_drafts'), DB.getAll('content_analyses')
   ]);
   technicians.sort((a,b)=>a.name.localeCompare(b.name));
   sites.sort((a,b)=>a.name.localeCompare(b.name));
@@ -80,7 +87,8 @@ async function refreshCache(){
   eventTypes.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
   emailVoiceSamples.sort((a,b)=> new Date(a.createdAt) - new Date(b.createdAt));
   emailDrafts.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)); // newest first
-  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts };
+  contentAnalyses.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)); // newest first
+  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses };
 }
 
 /* ---------------- status / KPI computation ---------------- */
@@ -190,7 +198,7 @@ function showModal(titleHTML, bodyHTML, footHTML, opts){
 function closeModal(){ document.getElementById('modalBackdrop').hidden = true; }
 
 /* ---------------- routing ---------------- */
-const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', compose:'Compose', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', reports:'Reports', search:'Search', settings:'Settings' };
+const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', compose:'Compose', assistant:'Assistant', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', reports:'Reports', search:'Search', settings:'Settings' };
 
 function navigate(route){
   state.route = route;
@@ -198,7 +206,7 @@ function navigate(route){
   document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active', b.dataset.route===route));
   document.getElementById('topbarTitle').textContent = ROUTE_TITLES[route] || '';
   document.getElementById('app').classList.remove('nav-open');
-  document.getElementById('topbarSettings').hidden = !(route === 'todos' || route === 'compose');
+  document.getElementById('topbarSettings').hidden = !(route === 'todos' || route === 'compose' || route === 'assistant');
   render();
 }
 
@@ -214,6 +222,7 @@ async function render(){
     case 'dashboard': main.innerHTML = renderDashboard(); mountDashboard(); break;
     case 'todos': main.innerHTML = renderTodos(); mountTodos(); break;
     case 'compose': main.innerHTML = renderCompose(); mountCompose(); break;
+    case 'assistant': main.innerHTML = renderAssistant(); mountAssistant(); break;
     case 'schedule': main.innerHTML = renderSchedule(); mountSchedule(); break;
     case 'technicians': main.innerHTML = renderTechnicians(); mountTechnicians(); break;
     case 'sites': main.innerHTML = renderSites(); mountSites(); break;
@@ -1086,6 +1095,7 @@ const EXPORT_LIBS = {
   xlsx: 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
   jspdf: 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
   jspdfAutotable: 'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js',
+  mammoth: 'https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js',
 };
 const _loadedScripts = {};
 function loadScriptOnce(src){
@@ -2215,12 +2225,18 @@ function renderCompose(){
   if(state.composeView === 'saved') return renderComposeSavedList();
   if(state.composeStep === 'result' && state.composeDraft) return renderComposeResult(s);
   const drafting = state.composeStep === 'drafting';
+  const replyBanner = state.composeReplyContext ? `
+    <div style="display:flex;align-items:flex-start;gap:8px;background:var(--gold-bg);border:1px solid var(--gold);border-radius:9px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:var(--ink);">
+      <div style="flex:1;">↩ Replying to: "${escapeHTML(state.composeReplyContext.slice(0,90))}${state.composeReplyContext.length>90?'…':''}"</div>
+      <button id="clearReplyContextBtn" style="background:none;border:none;color:var(--text-dim);font-size:13px;flex-shrink:0;">✕</button>
+    </div>` : '';
   return `
   ${composeDesktopHeader()}
   <div class="card card-pad" style="max-width:560px;">
+    ${replyBanner}
     <div class="field">
       <label>Rough notes</label>
-      <textarea id="composeNotes" placeholder="What do you need to say?" style="min-height:110px;" ${drafting?'disabled':''}>${escapeHTML(state.composeNotes)}</textarea>
+      <textarea id="composeNotes" placeholder="${state.composeReplyContext ? 'What do you want to say back?' : 'What do you need to say?'}" style="min-height:110px;" ${drafting?'disabled':''}>${escapeHTML(state.composeNotes)}</textarea>
       <div class="freq-hint">Type it, or tap your keyboard's dictation mic — rough is fine.</div>
     </div>
     <button class="btn btn-outline" id="composeSettingsSummary" style="width:100%;justify-content:center;margin-bottom:16px;" ${drafting?'disabled':''}>Email Settings</button>
@@ -2277,8 +2293,11 @@ async function runComposeDraft(){
   const s = state.cache.settings || {};
   try{
     const examples = (state.cache.emailVoiceSamples||[]).map(e=>e.content);
+    const notesForApi = state.composeReplyContext
+      ? `Original message I'm replying to:\n"""\n${state.composeReplyContext}\n"""\n\nWhat I want to say in my reply:\n${notes}`
+      : notes;
     const result = await draftEmail({
-      notes,
+      notes: notesForApi,
       style: s.emailStyle || 'formal',
       urgency: s.emailUrgency || 'not_urgent',
       urgencyCustom: s.emailUrgencyCustom || '',
@@ -2299,6 +2318,7 @@ function mountCompose(){
   document.getElementById('composeDesktopNew')?.addEventListener('click', ()=>{
     state.composeNotes = '';
     state.composeDraft = null;
+    state.composeReplyContext = '';
     state.composeStep = 'input';
     state.composeView = 'new';
     render();
@@ -2362,6 +2382,7 @@ function mountCompose(){
     return;
   }
   document.getElementById('composeNotes')?.addEventListener('input', (e)=>{ state.composeNotes = e.target.value; });
+  document.getElementById('clearReplyContextBtn')?.addEventListener('click', ()=>{ state.composeReplyContext = ''; render(); });
   document.getElementById('composeSettingsSummary')?.addEventListener('click', ()=>openEmailSettingsModal());
   document.getElementById('composeDraftBtn')?.addEventListener('click', ()=>runComposeDraft());
 }
@@ -2447,6 +2468,7 @@ function openEmailSettingsModal(){
   document.getElementById('emailClearTextBtn').addEventListener('click', ()=>{
     state.composeNotes = '';
     state.composeDraft = null;
+    state.composeReplyContext = '';
     state.composeStep = 'input';
     state.composeView = 'new';
     closeModal();
@@ -2482,6 +2504,302 @@ function openEmailSampleForm(editId){
     }
     closeModal(); toast(existing?'Example updated':'Example added'); render();
   });
+}
+
+/* ================= ASSISTANT (analyse content) ================= */
+function resetAssistant(){
+  state.assistantText = '';
+  state.assistantInstruction = (state.cache.settings || {}).assistantDefaultInstruction || '';
+  state.assistantFiles = [];
+  state.assistantStep = 'input';
+  state.assistantResult = null;
+  state.assistantView = 'new';
+}
+function arrayBufferToBase64(buf){
+  let binary = '';
+  const bytes = new Uint8Array(buf);
+  for(let i=0;i<bytes.byteLength;i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+async function assistantHandleFiles(fileList){
+  for(const file of Array.from(fileList)){
+    const ext = (file.name.split('.').pop()||'').toLowerCase();
+    try{
+      if(ext === 'pdf'){
+        const buf = await file.arrayBuffer();
+        state.assistantFiles.push({ name:file.name, kind:'pdf', data: arrayBufferToBase64(buf) });
+      } else if(['png','jpg','jpeg','gif','webp'].includes(ext)){
+        const buf = await file.arrayBuffer();
+        const mediaType = file.type || `image/${ext==='jpg'?'jpeg':ext}`;
+        state.assistantFiles.push({ name:file.name, kind:'image', data: arrayBufferToBase64(buf), mediaType });
+      } else if(['doc','docx'].includes(ext)){
+        await loadScriptOnce(EXPORT_LIBS.mammoth);
+        const buf = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer: buf });
+        state.assistantFiles.push({ name:file.name, kind:'text', extractedText: result.value });
+      } else if(['xls','xlsx','csv'].includes(ext)){
+        await loadScriptOnce(EXPORT_LIBS.xlsx);
+        const buf = await file.arrayBuffer();
+        const wb = XLSX.read(buf, { type:'array' });
+        const parts = wb.SheetNames.map(name => `Sheet: ${name}\n${XLSX.utils.sheet_to_csv(wb.Sheets[name])}`);
+        state.assistantFiles.push({ name:file.name, kind:'text', extractedText: parts.join('\n\n') });
+      } else {
+        toast(`"${file.name}" isn't a supported file type`);
+        continue;
+      }
+    } catch(e){
+      toast(`Could not read "${file.name}" — ${e?.message || 'try a different file'}`);
+    }
+  }
+  render();
+}
+function assistantDesktopHeader(){
+  return `
+  <div class="view-head" id="assistantViewHead">
+    <div></div>
+    <div class="view-actions" id="assistantViewActions">
+      <button class="btn btn-outline" id="assistantDesktopSettings">⋯ Settings</button>
+      <button class="btn" id="assistantDesktopNew">+ Analyse</button>
+    </div>
+  </div>`;
+}
+function renderAssistant(){
+  if(state.assistantView === 'saved') return renderAssistantSaved();
+  if(state.assistantStep === 'result' && state.assistantResult) return renderAssistantResult();
+  const analysing = state.assistantStep === 'analysing';
+  const fileRows = state.assistantFiles.map((f,i)=>`
+    <div class="file-chip">
+      <span>${f.kind==='pdf'?'📄':f.kind==='image'?'🖼️':'📝'}</span>
+      <span class="name">${escapeHTML(f.name)}</span>
+      <button class="remove" data-remove-file="${i}" ${analysing?'disabled':''}>✕</button>
+    </div>`).join('');
+  return `
+  ${assistantDesktopHeader()}
+  <div class="card card-pad" style="max-width:560px;">
+    <div class="field">
+      <label>Paste text</label>
+      <textarea id="assistantText" placeholder="Paste an email or any text here…" style="min-height:100px;" ${analysing?'disabled':''}>${escapeHTML(state.assistantText)}</textarea>
+    </div>
+    <div class="field">
+      <label>Anything specific? <span style="text-transform:none;font-weight:400;color:var(--text-faint);">(optional)</span></label>
+      <textarea id="assistantInstruction" placeholder='e.g. "just the figures", "does this contradict last week&#39;s email"…' style="min-height:44px;" ${analysing?'disabled':''}>${escapeHTML(state.assistantInstruction)}</textarea>
+      <div class="freq-hint">Leave blank for the standard summary + action points.</div>
+    </div>
+    <div class="field">
+      <label>Attachments</label>
+      ${fileRows}
+      <input type="file" id="assistantFileInput" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.png,.jpg,.jpeg,.gif,.webp" style="display:none;">
+      <button class="btn btn-outline" id="assistantAttachBtn" style="width:100%;justify-content:center;border-style:dashed;" ${analysing?'disabled':''}>+ Attach files (Word, Excel, PDF, images)</button>
+    </div>
+    <button class="btn" id="assistantAnalyseBtn" style="width:100%;justify-content:center;margin-top:6px;" ${analysing?'disabled':''}>${analysing?'Analysing…':'Analyse'}</button>
+  </div>
+  `;
+}
+function renderAssistantResult(){
+  const r = state.assistantResult;
+  const points = r.actionPoints || [];
+  const pointRows = points.length ? points.map((p,i)=>`
+    <div class="watch-row">
+      <div class="watch-name" style="font-size:12.5px;font-weight:600;flex:1;">${escapeHTML(p)}</div>
+      <button class="icon-btn" data-add-todo="${i}" ${r.addedFlags?.[i]?'disabled':''}>${r.addedFlags?.[i]?'✓ Added':'+ To-Do'}</button>
+    </div>`).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:8px 12px;">No action points found.</p>`;
+  return `
+  ${assistantDesktopHeader()}
+  <div class="card card-pad" style="max-width:560px;">
+    <div class="field">
+      <label>Summary</label>
+      <div class="box" style="background:#fff;border:1px solid var(--line-soft);border-radius:9px;padding:13px;font-size:13px;color:var(--ink);line-height:1.6;">${escapeHTML(r.summary || 'No summary available.')}</div>
+    </div>
+    <div class="field">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <label style="margin:0;">Action points</label>
+        ${points.length ? `<button class="icon-btn" id="assistantAddAllBtn">Add all to To-Do</button>` : ''}
+      </div>
+      <div class="card" style="padding:2px 8px;">${pointRows}</div>
+    </div>
+    <button class="btn" id="assistantDraftReplyBtn" style="width:100%;justify-content:center;margin-bottom:10px;">✉ Draft a reply</button>
+    <button class="btn btn-outline" id="assistantSaveBtn" style="width:100%;justify-content:center;margin-bottom:10px;">💾 Save this analysis</button>
+    <button class="btn-link" id="assistantBackBtn">‹ Back to input</button>
+  </div>
+  `;
+}
+function renderAssistantSaved(){
+  const items = state.cache.contentAnalyses || [];
+  const rows = items.length ? items.map(a=>{
+    const points = Array.isArray(a.actionPoints) ? a.actionPoints : [];
+    const fileCount = (a.fileNames||[]).length;
+    return `
+    <div class="watch-row">
+      <div><div class="watch-name">${escapeHTML((a.summary||'').slice(0,60) || 'Untitled analysis')}${(a.summary||'').length>60?'…':''}</div><div class="watch-meta">${fileCount} attachment${fileCount===1?'':'s'} · ${points.length} action point${points.length===1?'':'s'} · ${humanDate(toISO(new Date(a.createdAt)))}</div></div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-open-analysis="${a.id}">Open</button>
+      <button class="icon-btn" data-del-analysis="${a.id}">Delete</button>
+    </div>`;
+  }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No saved analyses yet — save one from the result screen.</p>`;
+  return `
+  ${assistantDesktopHeader()}
+  <div class="card" style="padding:4px 8px;max-width:560px;">${rows}</div>
+  `;
+}
+async function runAssistantAnalysis(){
+  const textEl = document.getElementById('assistantText');
+  const instrEl = document.getElementById('assistantInstruction');
+  const text = (textEl ? textEl.value : state.assistantText).trim();
+  const instruction = (instrEl ? instrEl.value : state.assistantInstruction).trim();
+  if(!text && state.assistantFiles.length === 0){ toast('Paste some text or attach a file first'); return; }
+  state.assistantText = text;
+  state.assistantInstruction = instruction;
+  state.assistantStep = 'analysing';
+  render();
+  try{
+    const result = await analyseContent({
+      text,
+      instruction,
+      attachments: state.assistantFiles.map(f => f.kind==='text'
+        ? { name:f.name, kind:'text', extractedText:f.extractedText }
+        : { name:f.name, kind:f.kind, data:f.data, mediaType:f.mediaType }),
+    });
+    state.assistantResult = { summary: result.summary, actionPoints: result.actionPoints || [], addedFlags: (result.actionPoints||[]).map(()=>false) };
+    state.assistantStep = 'result';
+  } catch(e){
+    toast(e?.message || 'Could not analyse this — check your connection and try again');
+    state.assistantStep = 'input';
+  }
+  render();
+}
+async function saveActionPointAsTodo(text){
+  await DB.add('todos', {
+    text, completed:false, dueDate: todayISO(), alertAt:null, alertFired:false,
+    source:'email', sourceRef: (state.assistantText||'').slice(0,80) || null,
+    createdAt: new Date().toISOString(),
+  });
+}
+function mountAssistant(){
+  document.getElementById('assistantDesktopSettings')?.addEventListener('click', ()=>openAssistantSettingsModal());
+  document.getElementById('assistantDesktopNew')?.addEventListener('click', ()=>{ resetAssistant(); render(); });
+
+  if(state.assistantView === 'saved'){
+    document.querySelectorAll('[data-open-analysis]').forEach(b=>b.addEventListener('click', ()=>{
+      const a = (state.cache.contentAnalyses||[]).find(x=>x.id===Number(b.dataset.openAnalysis));
+      if(!a) return;
+      state.assistantText = a.pastedText || '';
+      state.assistantInstruction = a.instruction || '';
+      state.assistantResult = { summary: a.summary, actionPoints: a.actionPoints||[], addedFlags: (a.actionPoints||[]).map(()=>false) };
+      state.assistantStep = 'result';
+      state.assistantView = 'new';
+      render();
+    }));
+    document.querySelectorAll('[data-del-analysis]').forEach(b=>b.addEventListener('click', async ()=>{
+      await DB.delete('content_analyses', Number(b.dataset.delAnalysis));
+      toast('Analysis deleted'); render();
+    }));
+    return;
+  }
+
+  if(state.assistantStep === 'result'){
+    document.querySelectorAll('[data-add-todo]').forEach(b=>b.addEventListener('click', async ()=>{
+      const idx = Number(b.dataset.addTodo);
+      await saveActionPointAsTodo(state.assistantResult.actionPoints[idx]);
+      await refreshCache();
+      state.assistantResult.addedFlags[idx] = true;
+      toast('Added to To-Do');
+      render();
+    }));
+    document.getElementById('assistantAddAllBtn')?.addEventListener('click', async ()=>{
+      const points = state.assistantResult.actionPoints || [];
+      for(let i=0;i<points.length;i++){
+        if(!state.assistantResult.addedFlags[i]){ await saveActionPointAsTodo(points[i]); state.assistantResult.addedFlags[i] = true; }
+      }
+      await refreshCache();
+      toast(`${points.length} added to To-Do`);
+      render();
+    });
+    document.getElementById('assistantDraftReplyBtn')?.addEventListener('click', ()=>{
+      state.composeReplyContext = state.assistantText || '(see attached analysis)';
+      state.composeNotes = '';
+      state.composeDraft = null;
+      state.composeStep = 'input';
+      state.composeView = 'new';
+      navigate('compose');
+    });
+    document.getElementById('assistantSaveBtn')?.addEventListener('click', async (e)=>{
+      const btn = e.currentTarget;
+      const originalLabel = btn.textContent;
+      try{
+        await DB.add('content_analyses', {
+          pastedText: state.assistantText,
+          instruction: state.assistantInstruction,
+          fileNames: state.assistantFiles.map(f=>f.name),
+          summary: state.assistantResult.summary,
+          actionPoints: state.assistantResult.actionPoints,
+          createdAt: new Date().toISOString(),
+        });
+        await refreshCache();
+        toast('Analysis saved');
+        btn.textContent = '✓ Saved';
+        setTimeout(()=>{ if(btn.isConnected) btn.textContent = originalLabel; }, 1600);
+      } catch(err){
+        toast(`Could not save — ${err?.message || 'please try again'}`);
+      }
+    });
+    document.getElementById('assistantBackBtn')?.addEventListener('click', ()=>{
+      state.assistantStep = 'input';
+      state.assistantFiles = [];
+      render();
+    });
+    return;
+  }
+
+  document.getElementById('assistantText')?.addEventListener('input', (e)=>{ state.assistantText = e.target.value; });
+  document.getElementById('assistantInstruction')?.addEventListener('input', (e)=>{ state.assistantInstruction = e.target.value; });
+  document.getElementById('assistantAttachBtn')?.addEventListener('click', ()=>document.getElementById('assistantFileInput').click());
+  document.getElementById('assistantFileInput')?.addEventListener('change', (e)=>{
+    if(e.target.files.length) assistantHandleFiles(e.target.files);
+    e.target.value = '';
+  });
+  document.querySelectorAll('[data-remove-file]').forEach(b=>b.addEventListener('click', ()=>{
+    state.assistantFiles.splice(Number(b.dataset.removeFile), 1);
+    render();
+  }));
+  document.getElementById('assistantAnalyseBtn')?.addEventListener('click', ()=>runAssistantAnalysis());
+}
+function openAssistantSettingsModal(){
+  const s = state.cache.settings || {};
+  const savedCount = (state.cache.contentAnalyses||[]).length;
+  const body = `
+    <div class="field">
+      <label>View</label>
+      <div class="chip-filter">
+        <button class="chip ${state.assistantView==='new'?'active':''}" data-assistant-view="new">Analyse</button>
+        <button class="chip ${state.assistantView==='saved'?'active':''}" data-assistant-view="saved">Saved${savedCount?` (${savedCount})`:''}</button>
+        <button class="chip" id="assistantClearBtn">Clear text &amp; files</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>Default instruction <span style="text-transform:none;font-weight:400;color:var(--text-faint);">(optional)</span></label>
+      <input id="assistantDefaultInstruction" value="${escapeHTML(s.assistantDefaultInstruction||'')}" placeholder="e.g. always flag anything Health &amp; Safety related">
+      <div class="freq-hint">Pre-fills "Anything specific?" every time — still editable per analysis.</div>
+    </div>
+  `;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn" id="assistantSettingsDone">Done</button></div>`;
+  showModal('Assistant settings', body, foot);
+
+  document.querySelectorAll('[data-assistant-view]').forEach(b=>b.addEventListener('click', ()=>{
+    state.assistantView = b.dataset.assistantView;
+    closeModal();
+    render();
+  }));
+  document.getElementById('assistantClearBtn').addEventListener('click', ()=>{
+    resetAssistant();
+    closeModal();
+    render();
+  });
+  document.getElementById('assistantDefaultInstruction').addEventListener('change', async (e)=>{
+    const current = state.cache.settings || {};
+    await DB.put('settings', { id:'settings', ...current, assistantDefaultInstruction: e.target.value });
+    await refreshCache();
+  });
+  document.getElementById('assistantSettingsDone').addEventListener('click', ()=>{ closeModal(); render(); });
 }
 
 /* ================= SEARCH ================= */
@@ -2952,6 +3270,7 @@ function mountSettings(){
       eventTypes: await DB.getAll('event_types'),
       emailVoiceSamples: await DB.getAll('email_voice_samples'),
       emailDrafts: await DB.getAll('email_drafts'),
+      contentAnalyses: await DB.getAll('content_analyses'),
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
@@ -2999,6 +3318,7 @@ function confirmResetAll(){
     await DB.clear('fleetcheck_records');
     await DB.clear('email_voice_samples');
     await DB.clear('email_drafts');
+    await DB.clear('content_analyses');
     await seedIfEmpty();
     closeModal(); toast('All data reset');
     state.weekStart = mondayOf(new Date());
@@ -3015,14 +3335,20 @@ function initNav(){
     else if(state.route==='compose'){
       state.composeNotes = '';
       state.composeDraft = null;
+      state.composeReplyContext = '';
       state.composeStep = 'input';
       state.composeView = 'new';
+      render();
+    }
+    else if(state.route==='assistant'){
+      resetAssistant();
       render();
     }
     else openEventForm({ date: todayISO() });
   });
   document.getElementById('topbarSettings').addEventListener('click', ()=>{
     if(state.route==='compose') openEmailSettingsModal();
+    else if(state.route==='assistant') openAssistantSettingsModal();
     else openTodoSettingsModal();
   });
   document.getElementById('logoutBtn').addEventListener('click', ()=>Auth.signOut());

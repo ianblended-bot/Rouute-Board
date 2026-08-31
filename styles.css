@@ -323,6 +323,10 @@ tbody tr:hover{ background:var(--paper-dim); }
 .skip-link{ position:absolute; left:-999px; }
 
 .freq-hint{ font-size:11.5px; color:var(--text-faint); margin-top:4px; }
+.file-chip{ display:flex; align-items:center; gap:8px; background:#fff; border:1px solid var(--line); border-radius:8px; padding:9px 11px; margin-bottom:6px; font-size:12.5px; }
+.file-chip .name{ flex:1; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.file-chip .remove{ background:none; border:none; color:var(--text-faint); font-size:13px; padding:2px 4px; flex-shrink:0; }
+.file-chip .remove:hover{ color:var(--clay); }
 
 /* ================= to-do list ================= */
 .todo-row{
@@ -449,4 +453,6 @@ tbody tr:hover{ background:var(--paper-dim); }
   #todoViewHead{ margin-bottom:0; }
   #composeViewActions{ display:none; }
   #composeViewHead{ margin-bottom:0; }
+  #assistantViewActions{ display:none; }
+  #assistantViewHead{ margin-bottom:0; }
 }

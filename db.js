@@ -137,6 +137,7 @@ const DEFAULT_SETTINGS = {
   emailStyle: 'formal',
   emailUrgency: 'not_urgent',
   emailUrgencyCustom: '',
+  assistantDefaultInstruction: '',
   emailAudience: 'middle_mgmt',
   emailAudienceCustom: '',
 };
@@ -207,4 +208,13 @@ async function draftEmail({ notes, style, urgency, urgencyCustom, audience, audi
   if(error) throw error;
   if(data?.error) throw new Error(data.error);
   return data; // { subject, body }
+}
+
+async function analyseContent({ text, instruction, attachments }){
+  const { data, error } = await sb.functions.invoke('analyse-content', {
+    body: { text, instruction, attachments },
+  });
+  if(error) throw error;
+  if(data?.error) throw new Error(data.error);
+  return data; // { summary, actionPoints }
 }

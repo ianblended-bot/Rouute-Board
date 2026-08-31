@@ -1,4 +1,4 @@
-const CACHE_NAME = 'routeboard-v29';
+const CACHE_NAME = 'routeboard-v31';
 const SHELL = [
   './',
   './index.html',
