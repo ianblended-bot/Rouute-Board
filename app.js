@@ -63,7 +63,8 @@ const state = {
   composeStep: 'input', // 'input' | 'drafting' | 'result'
   composeView: 'new', // 'new' | 'saved'
   composeDraft: null, // { subject, body }
-  composeReplyContext: '', // original analysed text, when arriving via "Draft a reply"
+  composeReplyContext: '', // full context built from the analysis (text + summary + action points), when arriving via "Draft a reply" — deliberately never includes raw attachment/file content
+  composeReplyPreview: '', // short human-readable preview shown in the banner
   assistantText: '',
   assistantInstruction: '',
   assistantFiles: [], // [{ name, kind: 'pdf'|'image'|'text', data/mediaType or extractedText }]
@@ -2227,7 +2228,7 @@ function renderCompose(){
   const drafting = state.composeStep === 'drafting';
   const replyBanner = state.composeReplyContext ? `
     <div style="display:flex;align-items:flex-start;gap:8px;background:var(--gold-bg);border:1px solid var(--gold);border-radius:9px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:var(--ink);">
-      <div style="flex:1;">↩ Replying to: "${escapeHTML(state.composeReplyContext.slice(0,90))}${state.composeReplyContext.length>90?'…':''}"</div>
+      <div style="flex:1;">↩ Replying to: "${escapeHTML((state.composeReplyPreview||'').slice(0,90))}${(state.composeReplyPreview||'').length>90?'…':''}"</div>
       <button id="clearReplyContextBtn" style="background:none;border:none;color:var(--text-dim);font-size:13px;flex-shrink:0;">✕</button>
     </div>` : '';
   return `
@@ -2294,7 +2295,7 @@ async function runComposeDraft(){
   try{
     const examples = (state.cache.emailVoiceSamples||[]).map(e=>e.content);
     const notesForApi = state.composeReplyContext
-      ? `Original message I'm replying to:\n"""\n${state.composeReplyContext}\n"""\n\nWhat I want to say in my reply:\n${notes}`
+      ? `Context for this reply, from a prior analysis:\n"""\n${state.composeReplyContext}\n"""\n\nWhat I want to say in my reply:\n${notes}`
       : notes;
     const result = await draftEmail({
       notes: notesForApi,
@@ -2319,6 +2320,7 @@ function mountCompose(){
     state.composeNotes = '';
     state.composeDraft = null;
     state.composeReplyContext = '';
+    state.composeReplyPreview = '';
     state.composeStep = 'input';
     state.composeView = 'new';
     render();
@@ -2382,7 +2384,7 @@ function mountCompose(){
     return;
   }
   document.getElementById('composeNotes')?.addEventListener('input', (e)=>{ state.composeNotes = e.target.value; });
-  document.getElementById('clearReplyContextBtn')?.addEventListener('click', ()=>{ state.composeReplyContext = ''; render(); });
+  document.getElementById('clearReplyContextBtn')?.addEventListener('click', ()=>{ state.composeReplyContext = ''; state.composeReplyPreview = ''; render(); });
   document.getElementById('composeSettingsSummary')?.addEventListener('click', ()=>openEmailSettingsModal());
   document.getElementById('composeDraftBtn')?.addEventListener('click', ()=>runComposeDraft());
 }
@@ -2469,6 +2471,7 @@ function openEmailSettingsModal(){
     state.composeNotes = '';
     state.composeDraft = null;
     state.composeReplyContext = '';
+    state.composeReplyPreview = '';
     state.composeStep = 'input';
     state.composeView = 'new';
     closeModal();
@@ -2715,7 +2718,16 @@ function mountAssistant(){
       render();
     });
     document.getElementById('assistantDraftReplyBtn')?.addEventListener('click', ()=>{
-      state.composeReplyContext = state.assistantText || '(see attached analysis)';
+      // Deliberately built from the pasted text + the distilled summary/action points
+      // only — never from raw attachment/file content, which stays out of Compose
+      // entirely so replies don't end up quoting raw data dumps.
+      const r = state.assistantResult;
+      const parts = [];
+      if(state.assistantText && state.assistantText.trim()) parts.push(`Original message:\n"""\n${state.assistantText.trim()}\n"""`);
+      if(r?.summary) parts.push(`Summary: ${r.summary}`);
+      if(r?.actionPoints?.length) parts.push(`Key points from this analysis:\n${r.actionPoints.map(p=>`- ${p}`).join('\n')}`);
+      state.composeReplyContext = parts.join('\n\n') || '(analysis had no text captured)';
+      state.composeReplyPreview = r?.summary || state.assistantText || 'Previous analysis';
       state.composeNotes = '';
       state.composeDraft = null;
       state.composeStep = 'input';
@@ -3336,6 +3348,7 @@ function initNav(){
       state.composeNotes = '';
       state.composeDraft = null;
       state.composeReplyContext = '';
+      state.composeReplyPreview = '';
       state.composeStep = 'input';
       state.composeView = 'new';
       render();
