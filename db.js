@@ -138,6 +138,8 @@ const DEFAULT_SETTINGS = {
   emailUrgency: 'not_urgent',
   emailUrgencyCustom: '',
   assistantDefaultInstruction: '',
+  outlookIcsUrl: '',
+  outlookLastSynced: null,
   emailAudience: 'middle_mgmt',
   emailAudienceCustom: '',
 };
@@ -217,4 +219,18 @@ async function analyseContent({ text, instruction, attachments }){
   if(error) throw error;
   if(data?.error) throw new Error(data.error);
   return data; // { summary, actionPoints }
+}
+
+async function solveProblem(payload){
+  const { data, error } = await sb.functions.invoke('solve-problem', { body: payload });
+  if(error) throw error;
+  if(data?.error) throw new Error(data.error);
+  return data;
+}
+
+async function syncOutlookCalendar({ icsUrl }){
+  const { data, error } = await sb.functions.invoke('sync-outlook-calendar', { body: { icsUrl } });
+  if(error) throw error;
+  if(data?.error) throw new Error(data.error);
+  return data; // { events: [{uid, title, date, startTime, endTime, allDay}] }
 }

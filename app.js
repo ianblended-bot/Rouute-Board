@@ -71,13 +71,29 @@ const state = {
   assistantStep: 'input', // 'input' | 'analysing' | 'result'
   assistantResult: null, // { summary, actionPoints }
   assistantView: 'new', // 'new' | 'saved'
+  psView: 'new', // 'new' | 'saved'
+  psMode: 'quick', // 'quick' | 'quick_result' | 'guided'
+  psProblemText: '',
+  psUrgency: 'medium',
+  psTriedAlready: '',
+  psPriority: 'fastest',
+  psQuickSuggestions: null, // { suggestions:[{title,tag,description}], addedFlags:[] }
+  psStep: 1, // 1-5 in guided mode
+  psRootCauseConvo: [], // [{role:'claude'|'user', text}]
+  psRootCauseSummary: '',
+  psBrainstormConvo: [],
+  psOptions: [], // [string]
+  psEvaluation: [], // [{option,pros,cons,effort}]
+  psChosenOption: '',
+  psActionPlan: null, // { items:[string], addedFlags:[] }
+  psLoading: false,
   todoViewDate: new Date(),
-  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[] },
+  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[], problemSessions:[], outlookEvents:[] },
 };
 
 async function refreshCache(){
-  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses] = await Promise.all([
-    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples'), DB.getAll('email_drafts'), DB.getAll('content_analyses')
+  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents] = await Promise.all([
+    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples'), DB.getAll('email_drafts'), DB.getAll('content_analyses'), DB.getAll('problem_sessions'), DB.getAll('outlook_events')
   ]);
   technicians.sort((a,b)=>a.name.localeCompare(b.name));
   sites.sort((a,b)=>a.name.localeCompare(b.name));
@@ -89,7 +105,9 @@ async function refreshCache(){
   emailVoiceSamples.sort((a,b)=> new Date(a.createdAt) - new Date(b.createdAt));
   emailDrafts.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)); // newest first
   contentAnalyses.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)); // newest first
-  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses };
+  problemSessions.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)); // newest first
+  outlookEvents.sort((a,b)=> a.date.localeCompare(b.date) || (a.startTime||'').localeCompare(b.startTime||''));
+  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents };
 }
 
 /* ---------------- status / KPI computation ---------------- */
@@ -199,7 +217,7 @@ function showModal(titleHTML, bodyHTML, footHTML, opts){
 function closeModal(){ document.getElementById('modalBackdrop').hidden = true; }
 
 /* ---------------- routing ---------------- */
-const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', compose:'Compose', assistant:'Assistant', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', reports:'Reports', search:'Search', settings:'Settings' };
+const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', compose:'Compose', assistant:'Assistant', problemsolver:'Problem Solver', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', reports:'Reports', search:'Search', settings:'Settings' };
 
 function navigate(route){
   state.route = route;
@@ -207,7 +225,7 @@ function navigate(route){
   document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active', b.dataset.route===route));
   document.getElementById('topbarTitle').textContent = ROUTE_TITLES[route] || '';
   document.getElementById('app').classList.remove('nav-open');
-  document.getElementById('topbarSettings').hidden = !(route === 'todos' || route === 'compose' || route === 'assistant');
+  document.getElementById('topbarSettings').hidden = !(route === 'todos' || route === 'compose' || route === 'assistant' || route === 'problemsolver');
   render();
 }
 
@@ -224,6 +242,7 @@ async function render(){
     case 'todos': main.innerHTML = renderTodos(); mountTodos(); break;
     case 'compose': main.innerHTML = renderCompose(); mountCompose(); break;
     case 'assistant': main.innerHTML = renderAssistant(); mountAssistant(); break;
+    case 'problemsolver': main.innerHTML = renderProblemSolver(); mountProblemSolver(); break;
     case 'schedule': main.innerHTML = renderSchedule(); mountSchedule(); break;
     case 'technicians': main.innerHTML = renderTechnicians(); mountTechnicians(); break;
     case 'sites': main.innerHTML = renderSites(); mountSites(); break;
@@ -486,6 +505,45 @@ function mountDashboard(){
 }
 
 /* ================= WEEKLY BOARD ================= */
+function outlookSyncStatusLabel(s){
+  if(!s.outlookIcsUrl) return '';
+  if(!s.outlookLastSynced) return ' · Calendar not synced yet';
+  const mins = Math.round((Date.now() - new Date(s.outlookLastSynced).getTime())/60000);
+  if(mins < 1) return ' · Calendar synced just now';
+  if(mins < 60) return ` · Calendar synced ${mins}m ago`;
+  const hrs = Math.round(mins/60);
+  if(hrs < 24) return ` · Calendar synced ${hrs}h ago`;
+  const days = Math.round(hrs/24);
+  return ` · Calendar synced ${days}d ago`;
+}
+async function runOutlookSync(btn){
+  const s = state.cache.settings || {};
+  const icsUrl = (s.outlookIcsUrl||'').trim();
+  if(!icsUrl){ toast('Add your Outlook calendar link in Settings first'); return; }
+  const originalLabel = btn ? btn.textContent : null;
+  if(btn){ btn.textContent = 'Syncing…'; btn.disabled = true; }
+  try{
+    const result = await syncOutlookCalendar({ icsUrl });
+    const events = result.events || [];
+    await DB.clear('outlook_events');
+    for(const ev of events){
+      await DB.add('outlook_events', {
+        uid: ev.uid, title: ev.title, date: ev.date,
+        startTime: ev.startTime, endTime: ev.endTime, allDay: ev.allDay,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    const current = state.cache.settings || {};
+    await DB.put('settings', { id:'settings', ...current, outlookLastSynced: new Date().toISOString() });
+    await refreshCache();
+    toast(`Synced ${events.length} calendar event${events.length===1?'':'s'}`);
+  } catch(e){
+    toast(e?.message || 'Could not sync your calendar — try again');
+  } finally {
+    if(btn){ btn.textContent = originalLabel; btn.disabled = false; }
+    render();
+  }
+}
 function renderSchedule(){
   const ws = state.weekStart;
   const days = Array.from({length:7}, (_,i)=>addDays(ws,i));
@@ -496,8 +554,14 @@ function renderSchedule(){
     const iso = toISO(d);
     const isToday = iso === todayIso;
     const isWeekend = i>=5;
-    const evs = state.cache.events.filter(e=>e.date===iso && e.type!=='techAbsence').sort((a,b)=>(a.time||'').localeCompare(b.time||''));
-    const evHTML = evs.map(e=>eventTagHTML(e)).join('');
+    const evs = state.cache.events.filter(e=>e.date===iso && e.type!=='techAbsence');
+    const outlookEvs = (state.cache.outlookEvents||[]).filter(o=>o.date===iso);
+    const conflicts = computeOutlookConflicts(outlookEvs, evs);
+    const merged = [
+      ...evs.map(e=>({ sortKey: e.time || '', html: eventTagHTML(e, conflicts.has('rb_'+e.id)) })),
+      ...outlookEvs.map(o=>({ sortKey: o.allDay ? '' : (o.startTime||''), html: outlookEventTagHTML(o, conflicts.has(o.uid)) })),
+    ].sort((a,b)=>a.sortKey.localeCompare(b.sortKey));
+    const evHTML = merged.map(m=>m.html).join('');
     return `
     <div class="day-sheet ${isToday?'is-today':''} ${isWeekend?'is-weekend':''}">
       <div class="day-head">
@@ -512,7 +576,7 @@ function renderSchedule(){
   <div class="view-head">
     <div>
       <h1>Weekly board</h1>
-      <div class="view-sub">${monthLabel(ws)} — plan tech visits, QA visits and 1-1s across the week</div>
+      <div class="view-sub">${monthLabel(ws)} — plan tech visits, QA visits and 1-1s across the week${outlookSyncStatusLabel(s)}</div>
     </div>
     <div class="view-actions">
       <div class="week-nav">
@@ -521,6 +585,7 @@ function renderSchedule(){
         <button class="btn btn-outline" id="wkNext">Next ›</button>
       </div>
       <button class="btn btn-outline" id="genScheduleBtn">✦ Generate schedule</button>
+      <button class="btn btn-outline" id="syncOutlookBtn">🔄 Sync calendar</button>
       <button class="btn btn-outline" id="exportBtn">⬇ Export</button>
       <button class="btn" id="addEventBtn">+ Add event</button>
     </div>
@@ -528,7 +593,53 @@ function renderSchedule(){
   <div class="board">${dayCols}</div>
   `;
 }
-function eventTagHTML(e){
+function toMinutes(hhmm){
+  if(!hhmm) return null;
+  const parts = String(hhmm).split(':');
+  const h = Number(parts[0]), m = Number(parts[1]);
+  if(Number.isNaN(h)) return null;
+  return h*60 + (m||0);
+}
+function computeOutlookConflicts(outlookEvs, rbEvs){
+  // Outlook events carry real start/end times. Route Board events only ever
+  // store a single start time (no duration), so they're treated as instants
+  // for this check: a conflict is either two Outlook events overlapping each
+  // other, or a Route Board event's start time landing inside an Outlook
+  // event's span. Returns a Set of ids in conflict — 'rb_<id>' for Route
+  // Board events, the raw uid for Outlook events — checkable from either side.
+  const conflicts = new Set();
+  const timed = outlookEvs.filter(o=>!o.allDay && o.startTime);
+  for(let i=0;i<timed.length;i++){
+    const oe = timed[i];
+    const oStart = toMinutes(oe.startTime);
+    if(oStart===null) continue;
+    const oEnd = oe.endTime ? toMinutes(oe.endTime) : oStart+30;
+    for(let j=i+1;j<timed.length;j++){
+      const other = timed[j];
+      const s2 = toMinutes(other.startTime);
+      if(s2===null) continue;
+      const e2 = other.endTime ? toMinutes(other.endTime) : s2+30;
+      if(oStart < e2 && s2 < oEnd){ conflicts.add(oe.uid); conflicts.add(other.uid); }
+    }
+    for(const rb of rbEvs){
+      const rbStart = toMinutes(rb.time);
+      if(rbStart===null) continue;
+      if(rbStart >= oStart && rbStart < oEnd){ conflicts.add(oe.uid); conflicts.add('rb_'+rb.id); }
+    }
+  }
+  return conflicts;
+}
+function outlookEventTagHTML(oe, isConflict){
+  const timeLabel = oe.allDay ? 'All day' : `${oe.startTime||''}${oe.endTime?`–${oe.endTime}`:''}`;
+  return `<div class="event-tag type-outlook ${isConflict?'has-conflict':''}">
+    <div class="et-body">
+      <div class="et-type">📅 Outlook${isConflict?' <span class="conflict-flag">Conflict</span>':''}</div>
+      <div class="et-title">${escapeHTML(oe.title)}</div>
+      <div class="et-meta">${escapeHTML(timeLabel)}</div>
+    </div>
+  </div>`;
+}
+function eventTagHTML(e, isConflict){
   const t = eventTypeByKey(e.type);
   const who = e.technicianId ? techName(e.technicianId) : null;
   const where = e.siteId ? siteName(e.siteId) : null;
@@ -538,7 +649,7 @@ function eventTagHTML(e){
   return `<div class="event-tag ${e.completed?'is-done':''} ${isMissed?'is-missed':''}" data-open-event="${e.id}" style="border-left-color:${t.color}; background:color-mix(in srgb, ${t.color} 12%, white);">
     <button class="et-check" data-toggle-complete="${e.id}" title="${e.completed?'Mark not done':'Mark done'}" aria-label="Toggle complete">✓</button>
     <div class="et-body">
-      <div class="et-type">${t.short}${isMissed?' · Missed':''}</div>
+      <div class="et-type">${t.short}${isMissed?' · Missed':''}${isConflict?' <span class="conflict-flag">Conflict</span>':''}</div>
       <div class="et-title">${escapeHTML(title)}</div>
       ${metaBits.length? `<div class="et-meta">${metaBits.map(escapeHTML).join(' · ')}</div>`:''}
     </div>
@@ -556,6 +667,7 @@ function mountSchedule(){
   document.getElementById('wkToday').addEventListener('click', ()=>{ state.weekStart = mondayOf(new Date()); render(); });
   document.getElementById('addEventBtn').addEventListener('click', ()=>openEventForm({ date: toISO(state.weekStart) }));
   document.getElementById('genScheduleBtn').addEventListener('click', ()=>openGenerateModal());
+  document.getElementById('syncOutlookBtn').addEventListener('click', (e)=>runOutlookSync(e.currentTarget));
   document.getElementById('exportBtn').addEventListener('click', ()=>openExportModal());
   document.querySelectorAll('[data-add-day]').forEach(b=>b.addEventListener('click', ()=>openEventForm({ date:b.dataset.addDay })));
   document.querySelectorAll('[data-open-event]').forEach(b=>b.addEventListener('click', ()=>openEventForm(null, Number(b.dataset.openEvent))));
@@ -1111,9 +1223,8 @@ function loadScriptOnce(src){
 }
 
 function buildExportRows(startISO, endISO){
-  return state.cache.events
+  const rbRows = state.cache.events
     .filter(e => e.date >= startISO && e.date <= endISO)
-    .sort((a,b)=> a.date.localeCompare(b.date) || (a.time||'').localeCompare(b.time||''))
     .map(e=>{
       const t = eventTypeByKey(e.type);
       const who = e.technicianId ? techName(e.technicianId) : '';
@@ -1128,8 +1239,25 @@ function buildExportRows(startISO, endISO){
         Time: e.time || '',
         Status: status,
         Notes: e.notes || '',
+        _sortTime: e.time || '',
       };
     });
+  const outlookRows = (state.cache.outlookEvents||[])
+    .filter(o => o.date >= startISO && o.date <= endISO)
+    .map(o=>({
+      Date: o.date,
+      Day: DOW_SHORT[(fromISO(o.date).getDay()+6)%7],
+      Type: 'Outlook',
+      Technician: '',
+      Site: '',
+      Time: o.allDay ? 'All day' : `${o.startTime||''}${o.endTime?`–${o.endTime}`:''}`,
+      Status: '',
+      Notes: o.title || '',
+      _sortTime: o.allDay ? '' : (o.startTime||''),
+    }));
+  return [...rbRows, ...outlookRows]
+    .sort((a,b)=> a.Date.localeCompare(b.Date) || a._sortTime.localeCompare(b._sortTime))
+    .map(({_sortTime, ...row}) => row);
 }
 
 function downloadBlob(blob, filename){
@@ -2814,6 +2942,522 @@ function openAssistantSettingsModal(){
   document.getElementById('assistantSettingsDone').addEventListener('click', ()=>{ closeModal(); render(); });
 }
 
+/* ================= PROBLEM SOLVER ================= */
+function resetProblemSolver(){
+  state.psMode = 'quick';
+  state.psProblemText = '';
+  state.psUrgency = 'medium';
+  state.psTriedAlready = '';
+  state.psPriority = 'fastest';
+  state.psQuickSuggestions = null;
+  state.psStep = 1;
+  state.psRootCauseConvo = [];
+  state.psRootCauseSummary = '';
+  state.psBrainstormConvo = [];
+  state.psOptions = [];
+  state.psEvaluation = [];
+  state.psChosenOption = '';
+  state.psActionPlan = null;
+  state.psLoading = false;
+  state.psView = 'new';
+}
+function psDesktopHeader(){
+  return `
+  <div class="view-head" id="psViewHead">
+    <div></div>
+    <div class="view-actions" id="psViewActions">
+      <button class="btn btn-outline" id="psDesktopSettings">⋯ Settings</button>
+      <button class="btn" id="psDesktopNew">+ New problem</button>
+    </div>
+  </div>`;
+}
+function psWizardChrome(stepNum, stepLabel, extraRight){
+  const segs = [1,2,3,4,5].map(n=>`<div class="ps-progress-seg ${n<=stepNum?'done':''}"></div>`).join('');
+  return `
+  <div class="ps-progress-row">${segs}</div>
+  <div class="ps-step-row">
+    <span class="ps-step-label">Step ${stepNum} of 5 — ${stepLabel}</span>
+    ${extraRight||''}
+  </div>`;
+}
+function renderProblemSolver(){
+  if(state.psView === 'saved') return renderPSSaved();
+  if(state.psMode === 'quick_result') return renderPSQuickResult();
+  if(state.psMode === 'guided') return renderPSGuided();
+  return renderPSQuick();
+}
+function renderPSQuick(){
+  const loading = state.psLoading;
+  return `
+  ${psDesktopHeader()}
+  <div class="card card-pad" style="max-width:560px;">
+    <div class="field">
+      <label>Describe the problem</label>
+      <textarea id="psProblemText" placeholder="What's going wrong?" style="min-height:90px;" ${loading?'disabled':''}>${escapeHTML(state.psProblemText)}</textarea>
+    </div>
+    <div class="field">
+      <label>How urgent is this?</label>
+      <div class="chip-filter">
+        <button class="chip ${state.psUrgency==='low'?'active':''}" data-ps-urgency="low">Low</button>
+        <button class="chip ${state.psUrgency==='medium'?'active':''}" data-ps-urgency="medium">Medium</button>
+        <button class="chip ${state.psUrgency==='high'?'active':''}" data-ps-urgency="high">High</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>Have you tried anything already? <span style="text-transform:none;font-weight:400;color:var(--text-faint);">(optional)</span></label>
+      <textarea id="psTriedAlready" placeholder="e.g. moved the huddle earlier, didn't help much" style="min-height:44px;" ${loading?'disabled':''}>${escapeHTML(state.psTriedAlready)}</textarea>
+    </div>
+    <div class="field">
+      <label>What matters most in a solution?</label>
+      <div class="chip-filter">
+        <button class="chip ${state.psPriority==='cheapest'?'active':''}" data-ps-priority="cheapest">Cheapest</button>
+        <button class="chip ${state.psPriority==='fastest'?'active':''}" data-ps-priority="fastest">Fastest to try</button>
+        <button class="chip ${state.psPriority==='reliable'?'active':''}" data-ps-priority="reliable">Most reliable long-term</button>
+      </div>
+    </div>
+    <button class="btn" id="psGetSuggestionsBtn" style="width:100%;justify-content:center;margin-bottom:10px;" ${loading?'disabled':''}>${loading?'Thinking…':'Get suggestions'}</button>
+    <button class="btn-link" id="psPreferGuidedBtn">Prefer the full guided process instead?</button>
+  </div>
+  `;
+}
+function renderPSQuickResult(){
+  const r = state.psQuickSuggestions;
+  const rows = (r?.suggestions||[]).map((s,i)=>`
+    <div class="card" style="padding:13px;margin-bottom:10px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;gap:8px;">
+        <span style="font-size:13px;font-weight:700;color:var(--ink);">${escapeHTML(s.title)}</span>
+        <span class="badge ${s.tag==='quick'?'badge-due':'badge-scheduled'}" style="flex-shrink:0;">${s.tag==='quick'?'Quick fix':'Longer-term'}</span>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.5;margin-bottom:8px;">${escapeHTML(s.description)}</div>
+      <button class="icon-btn" data-ps-add-todo="${i}" ${r.addedFlags?.[i]?'disabled':''}>${r.addedFlags?.[i]?'✓ Added':'+ To-Do'}</button>
+    </div>`).join('');
+  return `
+  ${psDesktopHeader()}
+  <div style="max-width:560px;">
+    ${rows || `<p style="font-size:12px;color:var(--text-faint);">No suggestions came back — try again.</p>`}
+    <button class="btn btn-outline" id="psExploreProperlyBtn" style="width:100%;justify-content:center;margin-bottom:10px;">Explore this properly &rsaquo;</button>
+    <button class="btn btn-outline" id="psSaveQuickBtn" style="width:100%;justify-content:center;margin-bottom:10px;">💾 Save this session</button>
+    <button class="btn-link" id="psBackToQuickBtn">‹ Back to problem</button>
+  </div>
+  `;
+}
+function renderPSStep1(){
+  return `
+  ${psDesktopHeader()}
+  <div class="card card-pad" style="max-width:560px;">
+    ${psWizardChrome(1, 'Define the problem')}
+    <div class="field">
+      <label>What's going wrong?</label>
+      <textarea id="psProblemText" placeholder="Describe it in your own words…" style="min-height:100px;">${escapeHTML(state.psProblemText)}</textarea>
+    </div>
+    <button class="btn" id="psStep1NextBtn" style="width:100%;justify-content:center;">Next: Find the root cause &rsaquo;</button>
+  </div>
+  `;
+}
+function renderPSStep2(){
+  const loading = state.psLoading;
+  const bubbles = state.psRootCauseConvo.map(t=>`<div class="ps-bubble ${t.role==='user'?'ps-user':'ps-claude'}">${escapeHTML(t.text)}</div>`).join('');
+  return `
+  ${psDesktopHeader()}
+  <div class="card card-pad" style="max-width:560px;">
+    ${psWizardChrome(2, 'Find the root cause', `<button class="btn-link" id="psStep2ContinueBtn" style="font-size:11px;">Continue &rsaquo;</button>`)}
+    <div class="ps-thread">${bubbles}${loading?'<div class="ps-bubble ps-claude">…</div>':''}</div>
+    <div style="display:flex;gap:8px;">
+      <input type="text" id="psStep2Reply" placeholder="Type your reply…" ${loading?'disabled':''}>
+      <button class="btn" id="psStep2SendBtn" ${loading?'disabled':''}>Send</button>
+    </div>
+  </div>
+  `;
+}
+function renderPSStep3(){
+  const loading = state.psLoading;
+  const bubbles = state.psBrainstormConvo.map(t=>`<div class="ps-bubble ${t.role==='user'?'ps-user':'ps-claude'}">${escapeHTML(t.text)}</div>`).join('');
+  return `
+  ${psDesktopHeader()}
+  <div class="card card-pad" style="max-width:560px;">
+    ${psWizardChrome(3, 'Brainstorm options', `<button class="btn-link" id="psStep3ContinueBtn" style="font-size:11px;">Continue &rsaquo;</button>`)}
+    ${state.psRootCauseSummary ? `<div class="ps-context-box"><b>Root cause</b>${escapeHTML(state.psRootCauseSummary)}</div>` : ''}
+    <div class="ps-thread">${bubbles}${loading?'<div class="ps-bubble ps-claude">…</div>':''}</div>
+    <div style="display:flex;gap:8px;">
+      <input type="text" id="psStep3Reply" placeholder="Type your reply…" ${loading?'disabled':''}>
+      <button class="btn" id="psStep3SendBtn" ${loading?'disabled':''}>Send</button>
+    </div>
+  </div>
+  `;
+}
+function renderPSStep4(){
+  const loading = state.psLoading;
+  const hasEval = state.psEvaluation.length > 0;
+  const rows = state.psOptions.map((opt,i)=>{
+    const ev = state.psEvaluation.find(e=>e.option===opt);
+    return `
+    <div class="card" style="padding:12px 13px;margin-bottom:8px;">
+      <label style="display:flex;align-items:flex-start;gap:8px;font-weight:700;font-size:12.5px;color:var(--ink);margin-bottom:6px;text-transform:none;letter-spacing:normal;text-align:left;">
+        <input type="radio" name="psChosenOption" value="${i}" ${state.psChosenOption===opt?'checked':''} style="width:auto;margin-top:2px;flex-shrink:0;">
+        <span style="text-transform:none;">${escapeHTML(opt)}</span>
+      </label>
+      ${ev ? `<div style="font-size:11.5px;color:var(--text-dim);line-height:1.6;padding-left:24px;">
+        <div><b>Pros:</b> ${escapeHTML(ev.pros)}</div>
+        <div><b>Cons:</b> ${escapeHTML(ev.cons)}</div>
+        <div><b>Effort:</b> ${escapeHTML(ev.effort)}</div>
+      </div>` : ''}
+    </div>`;
+  }).join('');
+  return `
+  ${psDesktopHeader()}
+  <div class="card card-pad" style="max-width:560px;">
+    ${psWizardChrome(4, 'Weigh them up')}
+    ${!hasEval ? `<button class="btn btn-outline" id="psEvaluateBtn" style="width:100%;justify-content:center;margin-bottom:14px;" ${loading?'disabled':''}>${loading?'Comparing…':'Compare these options'}</button>` : ''}
+    ${rows}
+    <button class="btn" id="psStep4NextBtn" style="width:100%;justify-content:center;margin-top:6px;" ${!state.psChosenOption?'disabled':''}>Next: Build an action plan &rsaquo;</button>
+  </div>
+  `;
+}
+function renderPSStep5(){
+  const loading = state.psLoading;
+  const plan = state.psActionPlan;
+  const rows = plan ? plan.items.map((item,i)=>`
+    <div class="watch-row">
+      <div class="watch-name" style="font-size:12.5px;font-weight:600;flex:1;">${escapeHTML(item)}</div>
+      <button class="icon-btn" data-ps-plan-add-todo="${i}" ${plan.addedFlags?.[i]?'disabled':''}>${plan.addedFlags?.[i]?'✓ Added':'+ To-Do'}</button>
+    </div>`).join('') : '';
+  return `
+  ${psDesktopHeader()}
+  <div class="card card-pad" style="max-width:560px;">
+    ${psWizardChrome(5, 'Build an action plan')}
+    <div class="ps-context-box"><b>Chosen solution</b>${escapeHTML(state.psChosenOption)}</div>
+    ${!plan ? `<button class="btn" id="psBuildPlanBtn" style="width:100%;justify-content:center;margin-bottom:14px;" ${loading?'disabled':''}>${loading?'Building…':'Build the plan'}</button>` : `
+    <div class="card" style="padding:2px 8px;margin-bottom:14px;">${rows}</div>
+    <button class="btn btn-outline" id="psSaveGuidedBtn" style="width:100%;justify-content:center;margin-bottom:10px;">💾 Save this session</button>
+    `}
+  </div>
+  `;
+}
+function renderPSGuided(){
+  if(state.psStep===1) return renderPSStep1();
+  if(state.psStep===2) return renderPSStep2();
+  if(state.psStep===3) return renderPSStep3();
+  if(state.psStep===4) return renderPSStep4();
+  if(state.psStep===5) return renderPSStep5();
+  return renderPSStep1();
+}
+function renderPSSaved(){
+  const items = state.cache.problemSessions || [];
+  const rows = items.length ? items.map(s=>`
+    <div class="watch-row">
+      <div><div class="watch-name">${escapeHTML((s.problemText||'').slice(0,60))}${(s.problemText||'').length>60?'…':''}</div><div class="watch-meta">${s.mode==='guided'?'Guided':'Quick'} · ${humanDate(toISO(new Date(s.createdAt)))}</div></div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-open-ps="${s.id}">Open</button>
+      <button class="icon-btn" data-del-ps="${s.id}">Delete</button>
+    </div>`).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No saved sessions yet.</p>`;
+  return `
+  ${psDesktopHeader()}
+  <div class="card" style="padding:4px 8px;max-width:560px;">${rows}</div>
+  `;
+}
+async function runQuickSuggestions(){
+  const textEl = document.getElementById('psProblemText');
+  const text = (textEl ? textEl.value : state.psProblemText).trim();
+  if(!text){ toast('Describe the problem first'); return; }
+  state.psProblemText = text;
+  state.psLoading = true;
+  render();
+  try{
+    const result = await solveProblem({
+      action: 'quick_suggestions', problem: text,
+      urgency: state.psUrgency, triedAlready: state.psTriedAlready, priority: state.psPriority,
+    });
+    state.psQuickSuggestions = { suggestions: result.suggestions || [], addedFlags: (result.suggestions||[]).map(()=>false) };
+    state.psMode = 'quick_result';
+  } catch(e){
+    toast(e?.message || 'Could not get suggestions — try again');
+  }
+  state.psLoading = false;
+  render();
+}
+async function sendRootCauseTurn(){
+  state.psLoading = true;
+  render();
+  try{
+    const result = await solveProblem({ action:'root_cause_chat', problem: state.psProblemText, conversation: state.psRootCauseConvo });
+    state.psRootCauseConvo.push({ role:'claude', text: result.message });
+  } catch(e){
+    toast(e?.message || 'Could not reach the assistant — try again');
+  }
+  state.psLoading = false;
+  render();
+}
+async function sendRootCauseReply(){
+  const input = document.getElementById('psStep2Reply');
+  const text = input?.value.trim();
+  if(!text) return;
+  state.psRootCauseConvo.push({ role:'user', text });
+  if(input) input.value = '';
+  await sendRootCauseTurn();
+}
+async function finishRootCauseStep(){
+  state.psLoading = true;
+  render();
+  try{
+    const result = await solveProblem({ action:'distill_root_cause', problem: state.psProblemText, conversation: state.psRootCauseConvo });
+    state.psRootCauseSummary = result.summary || '';
+  } catch(e){
+    toast(e?.message || 'Could not summarise — try again');
+    state.psLoading = false; render(); return;
+  }
+  state.psLoading = false;
+  state.psStep = 3;
+  render();
+  if(!state.psBrainstormConvo.length) sendBrainstormTurn();
+}
+async function sendBrainstormTurn(){
+  state.psLoading = true;
+  render();
+  try{
+    const result = await solveProblem({ action:'brainstorm_chat', problem: state.psProblemText, rootCauseSummary: state.psRootCauseSummary, conversation: state.psBrainstormConvo });
+    state.psBrainstormConvo.push({ role:'claude', text: result.message });
+  } catch(e){
+    toast(e?.message || 'Could not reach the assistant — try again');
+  }
+  state.psLoading = false;
+  render();
+}
+async function sendBrainstormReply(){
+  const input = document.getElementById('psStep3Reply');
+  const text = input?.value.trim();
+  if(!text) return;
+  state.psBrainstormConvo.push({ role:'user', text });
+  if(input) input.value = '';
+  await sendBrainstormTurn();
+}
+async function finishBrainstormStep(){
+  state.psLoading = true;
+  render();
+  try{
+    const result = await solveProblem({ action:'distill_options', problem: state.psProblemText, rootCauseSummary: state.psRootCauseSummary, conversation: state.psBrainstormConvo });
+    state.psOptions = result.options || [];
+  } catch(e){
+    toast(e?.message || 'Could not distill options — try again');
+    state.psLoading = false; render(); return;
+  }
+  state.psLoading = false;
+  state.psStep = 4;
+  render();
+}
+async function runEvaluateOptions(){
+  state.psLoading = true;
+  render();
+  try{
+    const result = await solveProblem({ action:'evaluate_options', problem: state.psProblemText, rootCauseSummary: state.psRootCauseSummary, options: state.psOptions });
+    state.psEvaluation = result.evaluation || [];
+  } catch(e){
+    toast(e?.message || 'Could not compare options — try again');
+  }
+  state.psLoading = false;
+  render();
+}
+async function runActionPlan(){
+  state.psLoading = true;
+  render();
+  try{
+    const result = await solveProblem({ action:'action_plan', problem: state.psProblemText, rootCauseSummary: state.psRootCauseSummary, chosenOption: state.psChosenOption });
+    state.psActionPlan = { items: result.actionPlan || [], addedFlags: (result.actionPlan||[]).map(()=>false) };
+  } catch(e){
+    toast(e?.message || 'Could not build the plan — try again');
+  }
+  state.psLoading = false;
+  render();
+}
+async function saveProblemSuggestionAsTodo(title){
+  await DB.add('todos', {
+    text: title, completed:false, dueDate: todayISO(), alertAt:null, alertFired:false,
+    source:'problem-solver', sourceRef: (state.psProblemText||'').slice(0,80) || null,
+    createdAt: new Date().toISOString(),
+  });
+}
+async function saveProblemSession(btn){
+  const originalLabel = btn.textContent;
+  try{
+    await DB.add('problem_sessions', {
+      problemText: state.psProblemText,
+      mode: state.psMode === 'guided' ? 'guided' : 'quick',
+      urgency: state.psUrgency,
+      triedAlready: state.psTriedAlready,
+      priority: state.psPriority,
+      suggestions: state.psQuickSuggestions?.suggestions || [],
+      rootCauseConversation: state.psRootCauseConvo,
+      rootCauseSummary: state.psRootCauseSummary,
+      brainstormConversation: state.psBrainstormConvo,
+      options: state.psOptions,
+      evaluation: state.psEvaluation,
+      chosenOption: state.psChosenOption,
+      actionPlan: state.psActionPlan?.items || [],
+      createdAt: new Date().toISOString(),
+    });
+    await refreshCache();
+    toast('Session saved');
+    btn.textContent = '✓ Saved';
+    setTimeout(()=>{ if(btn.isConnected) btn.textContent = originalLabel; }, 1600);
+  } catch(err){
+    toast(`Could not save — ${err?.message || 'please try again'}`);
+  }
+}
+function loadProblemSession(s){
+  state.psProblemText = s.problemText || '';
+  state.psUrgency = s.urgency || 'medium';
+  state.psTriedAlready = s.triedAlready || '';
+  state.psPriority = s.priority || 'fastest';
+  state.psRootCauseConvo = s.rootCauseConversation || [];
+  state.psRootCauseSummary = s.rootCauseSummary || '';
+  state.psBrainstormConvo = s.brainstormConversation || [];
+  state.psOptions = s.options || [];
+  state.psEvaluation = s.evaluation || [];
+  state.psChosenOption = s.chosenOption || '';
+  state.psView = 'new';
+  if(s.mode === 'guided'){
+    state.psMode = 'guided';
+    state.psActionPlan = (s.actionPlan&&s.actionPlan.length) ? { items: s.actionPlan, addedFlags: s.actionPlan.map(()=>false) } : null;
+    state.psStep = state.psActionPlan ? 5 : (s.options?.length ? 4 : (s.rootCauseSummary ? 3 : (s.rootCauseConversation?.length ? 2 : 1)));
+  } else {
+    state.psMode = 'quick_result';
+    state.psQuickSuggestions = { suggestions: s.suggestions||[], addedFlags: (s.suggestions||[]).map(()=>false) };
+  }
+}
+function mountProblemSolver(){
+  document.getElementById('psDesktopSettings')?.addEventListener('click', ()=>openProblemSolverSettingsModal());
+  document.getElementById('psDesktopNew')?.addEventListener('click', ()=>{ resetProblemSolver(); render(); });
+
+  if(state.psView === 'saved'){
+    document.querySelectorAll('[data-open-ps]').forEach(b=>b.addEventListener('click', ()=>{
+      const s = (state.cache.problemSessions||[]).find(x=>x.id===Number(b.dataset.openPs));
+      if(!s) return;
+      loadProblemSession(s);
+      render();
+    }));
+    document.querySelectorAll('[data-del-ps]').forEach(b=>b.addEventListener('click', async ()=>{
+      await DB.delete('problem_sessions', Number(b.dataset.delPs));
+      toast('Session deleted'); render();
+    }));
+    return;
+  }
+
+  if(state.psMode === 'quick'){
+    document.getElementById('psProblemText')?.addEventListener('input', (e)=>{ state.psProblemText = e.target.value; });
+    document.getElementById('psTriedAlready')?.addEventListener('input', (e)=>{ state.psTriedAlready = e.target.value; });
+    document.querySelectorAll('[data-ps-urgency]').forEach(b=>b.addEventListener('click', ()=>{ state.psUrgency = b.dataset.psUrgency; render(); }));
+    document.querySelectorAll('[data-ps-priority]').forEach(b=>b.addEventListener('click', ()=>{ state.psPriority = b.dataset.psPriority; render(); }));
+    document.getElementById('psGetSuggestionsBtn')?.addEventListener('click', ()=>runQuickSuggestions());
+    document.getElementById('psPreferGuidedBtn')?.addEventListener('click', ()=>{
+      const textEl = document.getElementById('psProblemText');
+      if(textEl) state.psProblemText = textEl.value;
+      state.psMode = 'guided';
+      state.psStep = 1;
+      render();
+    });
+    return;
+  }
+
+  if(state.psMode === 'quick_result'){
+    document.querySelectorAll('[data-ps-add-todo]').forEach(b=>b.addEventListener('click', async ()=>{
+      const idx = Number(b.dataset.psAddTodo);
+      const s = state.psQuickSuggestions.suggestions[idx];
+      await saveProblemSuggestionAsTodo(s.title);
+      await refreshCache();
+      state.psQuickSuggestions.addedFlags[idx] = true;
+      toast('Added to To-Do');
+      render();
+    }));
+    document.getElementById('psExploreProperlyBtn')?.addEventListener('click', ()=>{
+      state.psMode = 'guided';
+      state.psStep = 1;
+      render();
+    });
+    document.getElementById('psSaveQuickBtn')?.addEventListener('click', (e)=>saveProblemSession(e.currentTarget));
+    document.getElementById('psBackToQuickBtn')?.addEventListener('click', ()=>{
+      state.psMode = 'quick';
+      state.psQuickSuggestions = null;
+      render();
+    });
+    return;
+  }
+
+  if(state.psMode === 'guided'){
+    if(state.psStep === 1){
+      document.getElementById('psProblemText')?.addEventListener('input', (e)=>{ state.psProblemText = e.target.value; });
+      document.getElementById('psStep1NextBtn')?.addEventListener('click', ()=>{
+        const textEl = document.getElementById('psProblemText');
+        const text = (textEl ? textEl.value : state.psProblemText).trim();
+        if(!text){ toast('Describe the problem first'); return; }
+        state.psProblemText = text;
+        state.psStep = 2;
+        render();
+        if(!state.psRootCauseConvo.length) sendRootCauseTurn();
+      });
+    }
+    if(state.psStep === 2){
+      if(!state.psRootCauseConvo.length && !state.psLoading) sendRootCauseTurn();
+      document.getElementById('psStep2SendBtn')?.addEventListener('click', ()=>sendRootCauseReply());
+      document.getElementById('psStep2Reply')?.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); sendRootCauseReply(); } });
+      document.getElementById('psStep2ContinueBtn')?.addEventListener('click', ()=>finishRootCauseStep());
+    }
+    if(state.psStep === 3){
+      if(!state.psBrainstormConvo.length && !state.psLoading) sendBrainstormTurn();
+      document.getElementById('psStep3SendBtn')?.addEventListener('click', ()=>sendBrainstormReply());
+      document.getElementById('psStep3Reply')?.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); sendBrainstormReply(); } });
+      document.getElementById('psStep3ContinueBtn')?.addEventListener('click', ()=>finishBrainstormStep());
+    }
+    if(state.psStep === 4){
+      document.getElementById('psEvaluateBtn')?.addEventListener('click', ()=>runEvaluateOptions());
+      document.querySelectorAll('input[name="psChosenOption"]').forEach(r=>r.addEventListener('change', (e)=>{
+        state.psChosenOption = state.psOptions[Number(e.target.value)];
+        render();
+      }));
+      document.getElementById('psStep4NextBtn')?.addEventListener('click', ()=>{
+        state.psStep = 5;
+        render();
+      });
+    }
+    if(state.psStep === 5){
+      document.getElementById('psBuildPlanBtn')?.addEventListener('click', ()=>runActionPlan());
+      document.querySelectorAll('[data-ps-plan-add-todo]').forEach(b=>b.addEventListener('click', async ()=>{
+        const idx = Number(b.dataset.psPlanAddTodo);
+        await saveProblemSuggestionAsTodo(state.psActionPlan.items[idx]);
+        await refreshCache();
+        state.psActionPlan.addedFlags[idx] = true;
+        toast('Added to To-Do');
+        render();
+      }));
+      document.getElementById('psSaveGuidedBtn')?.addEventListener('click', (e)=>saveProblemSession(e.currentTarget));
+    }
+  }
+}
+function openProblemSolverSettingsModal(){
+  const savedCount = (state.cache.problemSessions||[]).length;
+  const body = `
+    <div class="field">
+      <label>View</label>
+      <div class="chip-filter">
+        <button class="chip ${state.psView==='new'?'active':''}" data-ps-view="new">Current</button>
+        <button class="chip ${state.psView==='saved'?'active':''}" data-ps-view="saved">Saved${savedCount?` (${savedCount})`:''}</button>
+        <button class="chip" id="psClearBtn">Clear &amp; start over</button>
+      </div>
+    </div>
+  `;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn" id="psSettingsDone">Done</button></div>`;
+  showModal('Problem Solver settings', body, foot);
+  document.querySelectorAll('[data-ps-view]').forEach(b=>b.addEventListener('click', ()=>{
+    state.psView = b.dataset.psView;
+    closeModal();
+    render();
+  }));
+  document.getElementById('psClearBtn').addEventListener('click', ()=>{
+    resetProblemSolver();
+    closeModal();
+    render();
+  });
+  document.getElementById('psSettingsDone').addEventListener('click', ()=>{ closeModal(); render(); });
+}
+
 /* ================= SEARCH ================= */
 const EVENT_TYPE_FILTERS = [['all','All types'],['techVisit','Tech visits'],['qaVisit','QA visits'],['oneOnOne','1-1s'],['wfh','WFH'],['leave','Leave'],['other','Other']];
 const TIME_FILTERS = [['all','All time'],['week','This week'],['month','This month'],['missed','Missed / unconfirmed'],['upcoming','Upcoming']];
@@ -3030,8 +3674,19 @@ function renderSettings(){
     <button class="btn btn-outline btn-small" id="addEmailSampleBtn" style="margin-top:8px;">+ Add example email</button>
   </div>
   <div class="card card-pad" style="max-width:480px;margin-top:16px;">
+    <h3 style="margin-bottom:4px;">Calendar Sync</h3>
+    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Show your Outlook calendar on the Weekly Board, alongside technician visits, with a flag when something overlaps.</p>
+    <div class="field">
+      <label>Outlook calendar link</label>
+      <input id="outlookIcsUrlInput" value="${escapeHTML(s.outlookIcsUrl||'')}" placeholder="https://outlook.office365.com/owa/calendar/…/reachcalendar.ics">
+      <div class="freq-hint">From Outlook: Settings → Calendar → Shared calendars → Publish a calendar → copy the ICS link. Treat this link like a password — anyone with it can see your calendar.</div>
+    </div>
+    <div style="font-size:11.5px;color:var(--text-dim);margin-bottom:10px;">${outlookSyncStatusLabel(s) ? outlookSyncStatusLabel(s).replace(' · ','') : 'Not synced yet'}</div>
+    <button class="btn btn-outline btn-small" id="settingsSyncOutlookBtn">🔄 Sync now</button>
+  </div>
+  <div class="card card-pad" style="max-width:480px;margin-top:16px;">
     <h3 style="margin-bottom:8px;">Data</h3>
-    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:12px;">Everything is stored locally in this browser (IndexedDB) — nothing is sent to a server.</p>
+    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:12px;">Everything is stored securely in your own Supabase project, tied to your account.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <button class="btn btn-outline" id="exportBtn">Export backup (.json)</button>
       <button class="btn btn-outline" id="clearEventsBtn">Clear schedule</button>
@@ -3268,6 +3923,13 @@ function mountSettings(){
     await DB.delete('email_voice_samples', Number(b.dataset.delSample));
     toast('Example removed'); render();
   }));
+  document.getElementById('outlookIcsUrlInput').addEventListener('change', async (e)=>{
+    const current = state.cache.settings || {};
+    await DB.put('settings', { id:'settings', ...current, outlookIcsUrl: e.target.value.trim() });
+    await refreshCache();
+    toast('Calendar link saved');
+  });
+  document.getElementById('settingsSyncOutlookBtn').addEventListener('click', (e)=>runOutlookSync(e.currentTarget));
   document.getElementById('exportBtn').addEventListener('click', async ()=>{
     const data = {
       technicians: await DB.getAll('technicians'),
@@ -3283,6 +3945,8 @@ function mountSettings(){
       emailVoiceSamples: await DB.getAll('email_voice_samples'),
       emailDrafts: await DB.getAll('email_drafts'),
       contentAnalyses: await DB.getAll('content_analyses'),
+      problemSessions: await DB.getAll('problem_sessions'),
+      outlookEvents: await DB.getAll('outlook_events'),
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
@@ -3331,6 +3995,8 @@ function confirmResetAll(){
     await DB.clear('email_voice_samples');
     await DB.clear('email_drafts');
     await DB.clear('content_analyses');
+    await DB.clear('problem_sessions');
+    await DB.clear('outlook_events');
     await seedIfEmpty();
     closeModal(); toast('All data reset');
     state.weekStart = mondayOf(new Date());
@@ -3357,11 +4023,16 @@ function initNav(){
       resetAssistant();
       render();
     }
+    else if(state.route==='problemsolver'){
+      resetProblemSolver();
+      render();
+    }
     else openEventForm({ date: todayISO() });
   });
   document.getElementById('topbarSettings').addEventListener('click', ()=>{
     if(state.route==='compose') openEmailSettingsModal();
     else if(state.route==='assistant') openAssistantSettingsModal();
+    else if(state.route==='problemsolver') openProblemSolverSettingsModal();
     else openTodoSettingsModal();
   });
   document.getElementById('logoutBtn').addEventListener('click', ()=>Auth.signOut());
