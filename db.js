@@ -161,6 +161,11 @@ const SEED_EVENT_TYPES = [
   { key:'block',       label:'Recurring block',      short:'Block',      color:'#8A5A2C', isSystem:true, sortOrder:7 },
   { key:'other',       label:'Other / admin',        short:'Other',      color:'#2C6E8C', isSystem:true, sortOrder:8 },
 ];
+const SEED_OUTLOOK_TYPE_RULES = [
+  { pattern:'Tech Visit', eventType:'techVisit', sortOrder:1 },
+  { pattern:'QA Visit',   eventType:'qaVisit',    sortOrder:2 },
+  { pattern:'1-1',        eventType:'oneOnOne',   sortOrder:3 },
+];
 
 async function seedIfEmpty(){
   const existing = await DB.getAll('technicians');
@@ -194,6 +199,12 @@ async function seedIfEmpty(){
   if(existingEventTypes.length === 0){
     for(const et of SEED_EVENT_TYPES){
       await DB.add('event_types', { ...et, createdAt: new Date().toISOString() });
+    }
+  }
+  const existingOutlookRules = await DB.getAll('outlook_type_rules');
+  if(existingOutlookRules.length === 0){
+    for(const r of SEED_OUTLOOK_TYPE_RULES){
+      await DB.add('outlook_type_rules', { ...r, createdAt: new Date().toISOString() });
     }
   }
   const settings = await DB.get('settings', 'settings');

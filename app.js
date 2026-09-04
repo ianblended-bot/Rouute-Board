@@ -88,12 +88,12 @@ const state = {
   psActionPlan: null, // { items:[string], addedFlags:[] }
   psLoading: false,
   todoViewDate: new Date(),
-  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[], problemSessions:[], outlookEvents:[] },
+  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[], problemSessions:[], outlookEvents:[], outlookTypeRules:[] },
 };
 
 async function refreshCache(){
-  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents] = await Promise.all([
-    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples'), DB.getAll('email_drafts'), DB.getAll('content_analyses'), DB.getAll('problem_sessions'), DB.getAll('outlook_events')
+  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules] = await Promise.all([
+    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples'), DB.getAll('email_drafts'), DB.getAll('content_analyses'), DB.getAll('problem_sessions'), DB.getAll('outlook_events'), DB.getAll('outlook_type_rules')
   ]);
   technicians.sort((a,b)=>a.name.localeCompare(b.name));
   sites.sort((a,b)=>a.name.localeCompare(b.name));
@@ -107,7 +107,8 @@ async function refreshCache(){
   contentAnalyses.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)); // newest first
   problemSessions.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)); // newest first
   outlookEvents.sort((a,b)=> a.date.localeCompare(b.date) || (a.startTime||'').localeCompare(b.startTime||''));
-  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents };
+  outlookTypeRules.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
+  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules };
 }
 
 /* ---------------- status / KPI computation ---------------- */
@@ -174,7 +175,10 @@ function weekEvents(weekStartDate){
 }
 function weeklyKPI(weekStartDate){
   const evs = weekEvents(weekStartDate);
-  const count = t => evs.filter(e=>e.type===t).length;
+  const startISO = toISO(weekStartDate);
+  const endISO = toISO(addDays(weekStartDate,6));
+  const recognisedOutlook = (state.cache.outlookEvents||[]).filter(o=>o.matchedType && o.date>=startISO && o.date<=endISO);
+  const count = t => evs.filter(e=>e.type===t).length + recognisedOutlook.filter(o=>o.matchedType===t).length;
   return {
     techVisits: count('techVisit'),
     qaVisits: count('qaVisit'),
@@ -260,7 +264,7 @@ function renderDashboard(){
   const sites = state.cache.sites.filter(s=>s.active);
   const kpi = weeklyKPI(state.weekStart);
   const s = state.cache.settings || { techVisitsPerWeekMin:3, qaVisitsPerWeekMin:4 };
-  const totalEvents = state.cache.events.length;
+  const totalEvents = state.cache.events.length + (state.cache.outlookEvents||[]).filter(o=>o.matchedType).length;
 
   const techStatuses = techs.map(t=>({ t, tv: techVisitStatus(t), oo: oneOnOneStatus(t) }));
   const overdueTech = techStatuses.filter(x=>x.tv.state==='overdue' || x.oo.state==='overdue');
@@ -525,11 +529,17 @@ async function runOutlookSync(btn){
   try{
     const result = await syncOutlookCalendar({ icsUrl });
     const events = result.events || [];
+    const rules = state.cache.outlookTypeRules || [];
     await DB.clear('outlook_events');
     for(const ev of events){
+      const classified = classifyOutlookEvent(ev.title, rules);
       await DB.add('outlook_events', {
         uid: ev.uid, title: ev.title, date: ev.date,
         startTime: ev.startTime, endTime: ev.endTime, allDay: ev.allDay,
+        matchedType: classified.matchedType,
+        matchedSiteId: classified.matchedSiteId,
+        matchedTechnicianId: classified.matchedTechnicianId,
+        rawNamePart: classified.rawNamePart,
         createdAt: new Date().toISOString(),
       });
     }
@@ -629,8 +639,65 @@ function computeOutlookConflicts(outlookEvs, rbEvs){
   }
   return conflicts;
 }
+function extractOutlookNamePart(title){
+  const idx = title.lastIndexOf(' - ');
+  if(idx === -1) return '';
+  return title.slice(idx+3).trim();
+}
+function matchOutlookRule(title, rules){
+  const lower = title.toLowerCase();
+  for(const rule of rules){ // first match wins, in configured order
+    if(lower.includes(rule.pattern.toLowerCase())) return rule;
+  }
+  return null;
+}
+function findSiteByName(name){
+  if(!name) return null;
+  const lower = name.toLowerCase();
+  return state.cache.sites.find(s=>s.name.toLowerCase()===lower)
+      || state.cache.sites.find(s=>s.name.toLowerCase().includes(lower) || lower.includes(s.name.toLowerCase()))
+      || null;
+}
+function findTechByName(name){
+  if(!name) return null;
+  const lower = name.toLowerCase();
+  return state.cache.technicians.find(t=>t.name.toLowerCase()===lower)
+      || state.cache.technicians.find(t=>t.name.toLowerCase().includes(lower) || lower.includes(t.name.toLowerCase()))
+      || null;
+}
+function classifyOutlookEvent(title, rules){
+  const rule = matchOutlookRule(title, rules);
+  if(!rule) return { matchedType:null, matchedSiteId:null, matchedTechnicianId:null, rawNamePart:'' };
+  const namePart = extractOutlookNamePart(title);
+  let matchedSiteId = null, matchedTechnicianId = null;
+  if(rule.eventType === 'techVisit' || rule.eventType === 'qaVisit'){
+    const site = findSiteByName(namePart);
+    if(site) matchedSiteId = site.id;
+  } else if(rule.eventType === 'oneOnOne'){
+    const tech = findTechByName(namePart);
+    if(tech) matchedTechnicianId = tech.id;
+  }
+  return { matchedType: rule.eventType, matchedSiteId, matchedTechnicianId, rawNamePart: namePart };
+}
 function outlookEventTagHTML(oe, isConflict){
   const timeLabel = oe.allDay ? 'All day' : `${oe.startTime||''}${oe.endTime?`–${oe.endTime}`:''}`;
+  if(oe.matchedType){
+    // Recognised via a title-matching rule — render like a native tile of
+    // that type so it looks and counts the same as a manually-entered visit,
+    // with just a small marker showing it came from Outlook.
+    const t = eventTypeByKey(oe.matchedType);
+    const who = oe.matchedTechnicianId ? techName(oe.matchedTechnicianId) : null;
+    const where = oe.matchedSiteId ? siteName(oe.matchedSiteId) : null;
+    const title = who || where || oe.rawNamePart || t.label;
+    return `<div class="event-tag type-${oe.matchedType} ${isConflict?'has-conflict':''}" style="position:relative;">
+      <div class="et-body">
+        <div class="et-type">${t.short}${isConflict?' <span class="conflict-flag">Conflict</span>':''}</div>
+        <div class="et-title">${escapeHTML(title)}</div>
+        <div class="et-meta">${escapeHTML(oe.allDay?'All day':(oe.startTime||''))}</div>
+      </div>
+      <span class="synced-ico" title="From Outlook">📅</span>
+    </div>`;
+  }
   return `<div class="event-tag type-outlook ${isConflict?'has-conflict':''}">
     <div class="et-body">
       <div class="et-type">📅 Outlook${isConflict?' <span class="conflict-flag">Conflict</span>':''}</div>
@@ -2607,6 +2674,37 @@ function openEmailSettingsModal(){
   });
   document.getElementById('emailSettingsDone').addEventListener('click', ()=>{ closeModal(); render(); });
 }
+function openOutlookRuleForm(editId){
+  const existing = editId ? (state.cache.outlookTypeRules||[]).find(r=>r.id===editId) : null;
+  const v = existing || { pattern:'', eventType:'techVisit' };
+  const typeOptions = eventTypeList().map(t=>`<option value="${t.key}" ${v.eventType===t.key?'selected':''}>${escapeHTML(t.label)}</option>`).join('');
+  const body = `
+    <div class="field"><label>If the title contains</label><input id="orPattern" value="${escapeHTML(v.pattern)}" placeholder="e.g. Tech Visit"></div>
+    <div class="field"><label>Treat as</label><select id="orEventType">${typeOptions}</select></div>
+  `;
+  const foot = `
+    ${existing ? `<button class="btn btn-danger" id="orDelete">Remove</button>` : `<span></span>`}
+    <div class="modal-foot-right"><button class="btn btn-outline" id="orCancel">Cancel</button><button class="btn" id="orSave">${existing?'Save':'Add'}</button></div>
+  `;
+  showModal(existing?'Edit pattern':'Add pattern', body, foot);
+  document.getElementById('orCancel').addEventListener('click', closeModal);
+  document.getElementById('orDelete')?.addEventListener('click', async ()=>{
+    await DB.delete('outlook_type_rules', editId);
+    closeModal(); toast('Pattern removed'); render();
+  });
+  document.getElementById('orSave').addEventListener('click', async ()=>{
+    const pattern = document.getElementById('orPattern').value.trim();
+    if(!pattern){ toast('Enter a pattern to match'); return; }
+    const eventType = document.getElementById('orEventType').value;
+    if(existing){
+      await DB.put('outlook_type_rules', { ...existing, pattern, eventType });
+    } else {
+      const maxOrder = Math.max(0, ...(state.cache.outlookTypeRules||[]).map(r=>r.sortOrder||0));
+      await DB.add('outlook_type_rules', { pattern, eventType, sortOrder: maxOrder+1, createdAt: new Date().toISOString() });
+    }
+    closeModal(); toast(existing?'Pattern updated':'Pattern added'); render();
+  });
+}
 function openEmailSampleForm(editId){
   const existing = editId ? (state.cache.emailVoiceSamples||[]).find(e=>e.id===editId) : null;
   const v = existing || { label:'', content:'' };
@@ -3623,6 +3721,20 @@ function renderSettings(){
       <button class="icon-btn" data-edit-sample="${e.id}">Edit</button>
       <button class="icon-btn" data-del-sample="${e.id}">Remove</button>
     </div>`).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No examples yet — add a few real emails you've sent so drafts sound like you.</p>`;
+  const outlookRules = state.cache.outlookTypeRules || [];
+  const outlookRuleRows = outlookRules.length ? outlookRules.map(r=>{
+    const t = eventTypeByKey(r.eventType);
+    return `
+    <div class="watch-row">
+      <span class="badge badge-neutral">"${escapeHTML(r.pattern)}"</span>
+      <span style="color:var(--text-faint);">&rarr;</span>
+      <span class="dot" style="background:${t.color};"></span>
+      <div class="watch-name">${escapeHTML(t.short)}</div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-edit-outlook-rule="${r.id}">Edit</button>
+      <button class="icon-btn" data-del-outlook-rule="${r.id}">Remove</button>
+    </div>`;
+  }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No patterns yet — synced Outlook entries will all show as generic "Outlook" tiles until you add some.</p>`;
   const eventTypeRows = eventTypeList().length ? eventTypeList().map(t=>{
     const usageCount = state.cache.events.filter(e=>e.type===t.key).length;
     return `
@@ -3683,6 +3795,12 @@ function renderSettings(){
     </div>
     <div style="font-size:11.5px;color:var(--text-dim);margin-bottom:10px;">${outlookSyncStatusLabel(s) ? outlookSyncStatusLabel(s).replace(' · ','') : 'Not synced yet'}</div>
     <button class="btn btn-outline btn-small" id="settingsSyncOutlookBtn">🔄 Sync now</button>
+  </div>
+  <div class="card card-pad" style="max-width:480px;margin-top:16px;">
+    <h3 style="margin-bottom:4px;">Title matching</h3>
+    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Recognise these patterns in your Outlook titles so they're counted properly instead of showing as a duplicate. Checked in order — the first match wins.</p>
+    <div id="outlookRuleList">${outlookRuleRows}</div>
+    <button class="btn btn-outline btn-small" id="addOutlookRuleBtn" style="margin-top:8px;">+ Add a pattern</button>
   </div>
   <div class="card card-pad" style="max-width:480px;margin-top:16px;">
     <h3 style="margin-bottom:8px;">Data</h3>
@@ -3930,6 +4048,12 @@ function mountSettings(){
     toast('Calendar link saved');
   });
   document.getElementById('settingsSyncOutlookBtn').addEventListener('click', (e)=>runOutlookSync(e.currentTarget));
+  document.getElementById('addOutlookRuleBtn').addEventListener('click', ()=>openOutlookRuleForm());
+  document.querySelectorAll('[data-edit-outlook-rule]').forEach(b=>b.addEventListener('click', ()=>openOutlookRuleForm(Number(b.dataset.editOutlookRule))));
+  document.querySelectorAll('[data-del-outlook-rule]').forEach(b=>b.addEventListener('click', async ()=>{
+    await DB.delete('outlook_type_rules', Number(b.dataset.delOutlookRule));
+    toast('Pattern removed'); render();
+  }));
   document.getElementById('exportBtn').addEventListener('click', async ()=>{
     const data = {
       technicians: await DB.getAll('technicians'),
@@ -3947,6 +4071,7 @@ function mountSettings(){
       contentAnalyses: await DB.getAll('content_analyses'),
       problemSessions: await DB.getAll('problem_sessions'),
       outlookEvents: await DB.getAll('outlook_events'),
+      outlookTypeRules: await DB.getAll('outlook_type_rules'),
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
@@ -3997,6 +4122,7 @@ function confirmResetAll(){
     await DB.clear('content_analyses');
     await DB.clear('problem_sessions');
     await DB.clear('outlook_events');
+    await DB.clear('outlook_type_rules');
     await seedIfEmpty();
     closeModal(); toast('All data reset');
     state.weekStart = mondayOf(new Date());
