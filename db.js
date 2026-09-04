@@ -140,6 +140,7 @@ const DEFAULT_SETTINGS = {
   assistantDefaultInstruction: '',
   outlookIcsUrl: '',
   outlookLastSynced: null,
+  outlookShowConflicts: true,
   emailAudience: 'middle_mgmt',
   emailAudienceCustom: '',
 };

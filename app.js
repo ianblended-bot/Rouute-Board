@@ -55,6 +55,7 @@ const state = {
   searchTimeFilter: 'all',
   fleetCheckTab: 'daily',
   fleetCheckDate: new Date(),
+  huddleDate: new Date(),
   fleetCheckMonth: new Date(),
   reportsRange: 'month',
   todoFilter: 'open',
@@ -221,7 +222,7 @@ function showModal(titleHTML, bodyHTML, footHTML, opts){
 function closeModal(){ document.getElementById('modalBackdrop').hidden = true; }
 
 /* ---------------- routing ---------------- */
-const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', compose:'Compose', assistant:'Assistant', problemsolver:'Problem Solver', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', reports:'Reports', search:'Search', settings:'Settings' };
+const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', compose:'Compose', assistant:'Assistant', problemsolver:'Problem Solver', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', huddleregister:'Huddle Register', reports:'Reports', search:'Search', settings:'Settings' };
 
 function navigate(route){
   state.route = route;
@@ -251,6 +252,7 @@ async function render(){
     case 'technicians': main.innerHTML = renderTechnicians(); mountTechnicians(); break;
     case 'sites': main.innerHTML = renderSites(); mountSites(); break;
     case 'fleetcheck': main.innerHTML = renderFleetCheck(); mountFleetCheck(); break;
+    case 'huddleregister': main.innerHTML = renderHuddleRegister(); mountHuddleRegister(); break;
     case 'reports': main.innerHTML = renderReports(); mountReports(); break;
     case 'search': main.innerHTML = renderSearch(); mountSearch(); break;
     case 'settings': main.innerHTML = renderSettings(); mountSettings(); break;
@@ -566,7 +568,7 @@ function renderSchedule(){
     const isWeekend = i>=5;
     const evs = state.cache.events.filter(e=>e.date===iso && e.type!=='techAbsence');
     const outlookEvs = (state.cache.outlookEvents||[]).filter(o=>o.date===iso);
-    const conflicts = computeOutlookConflicts(outlookEvs, evs);
+    const conflicts = s.outlookShowConflicts===false ? new Set() : computeOutlookConflicts(outlookEvs, evs);
     const merged = [
       ...evs.map(e=>({ sortKey: e.time || '', html: eventTagHTML(e, conflicts.has('rb_'+e.id)) })),
       ...outlookEvs.map(o=>({ sortKey: o.allDay ? '' : (o.startTime||''), html: outlookEventTagHTML(o, conflicts.has(o.uid)) })),
@@ -691,7 +693,7 @@ function outlookEventTagHTML(oe, isConflict){
     const title = who || where || oe.rawNamePart || t.label;
     return `<div class="event-tag type-${oe.matchedType} ${isConflict?'has-conflict':''}" style="position:relative;">
       <div class="et-body">
-        <div class="et-type">${t.short}${isConflict?' <span class="conflict-flag">Conflict</span>':''}</div>
+        <div class="et-type">${t.short}${isConflict?' <span class="conflict-flag" title="Conflicts with another entry">⚠</span>':''}</div>
         <div class="et-title">${escapeHTML(title)}</div>
         <div class="et-meta">${escapeHTML(oe.allDay?'All day':(oe.startTime||''))}</div>
       </div>
@@ -700,7 +702,7 @@ function outlookEventTagHTML(oe, isConflict){
   }
   return `<div class="event-tag type-outlook ${isConflict?'has-conflict':''}">
     <div class="et-body">
-      <div class="et-type">📅 Outlook${isConflict?' <span class="conflict-flag">Conflict</span>':''}</div>
+      <div class="et-type">📅 Outlook${isConflict?' <span class="conflict-flag" title="Conflicts with another entry">⚠</span>':''}</div>
       <div class="et-title">${escapeHTML(oe.title)}</div>
       <div class="et-meta">${escapeHTML(timeLabel)}</div>
     </div>
@@ -716,7 +718,7 @@ function eventTagHTML(e, isConflict){
   return `<div class="event-tag ${e.completed?'is-done':''} ${isMissed?'is-missed':''}" data-open-event="${e.id}" style="border-left-color:${t.color}; background:color-mix(in srgb, ${t.color} 12%, white);">
     <button class="et-check" data-toggle-complete="${e.id}" title="${e.completed?'Mark not done':'Mark done'}" aria-label="Toggle complete">✓</button>
     <div class="et-body">
-      <div class="et-type">${t.short}${isMissed?' · Missed':''}${isConflict?' <span class="conflict-flag">Conflict</span>':''}</div>
+      <div class="et-type">${t.short}${isMissed?' · Missed':''}${isConflict?' <span class="conflict-flag" title="Conflicts with another entry">⚠</span>':''}</div>
       <div class="et-title">${escapeHTML(title)}</div>
       ${metaBits.length? `<div class="et-meta">${metaBits.map(escapeHTML).join(' · ')}</div>`:''}
     </div>
@@ -841,7 +843,7 @@ function openEventForm(defaults, editId){
       // record every technician explicitly (attended true/false), not just the ones ticked —
       // that way "reviewed, nobody attended" is distinguishable from "never reviewed at all"
       for(const el of allAttendInputs){
-        await DB.add('huddle_attendance', { eventId: editId, technicianId: Number(el.value), attended: el.checked });
+        await DB.add('huddle_attendance', { eventId: editId, technicianId: Number(el.value), attended: el.checked, date: obj.date });
       }
     }
     closeModal(); toast(isEdit? 'Event updated':'Event added'); render();
@@ -1920,6 +1922,71 @@ function mountFleetCheck(){
   }));
 }
 
+/* ================= HUDDLE REGISTER ================= */
+function renderHuddleRegister(){
+  const dateISO = toISO(state.huddleDate);
+  const techs = state.cache.technicians.filter(t=>t.active);
+  const attendedIds = new Set(state.cache.huddleAttendance.filter(a=>a.date===dateISO && a.attended).map(a=>a.technicianId));
+
+  const dow = fromISO(dateISO).getDay();
+  const isNonWorkingNote = (dow===0||dow===6)
+    ? `<p style="font-size:12px;color:var(--text-faint);margin:-8px 0 14px;">Weekend — not counted as a required day in Reports, but you can still log attendance here if a huddle happened.</p>`
+    : '';
+
+  const rows = techs.map(t=>{
+    let awayTag = '';
+    const workDays = (t.workDays && t.workDays.length) ? t.workDays : [1,2,3,4,5];
+    const isoDow = (fromISO(dateISO).getDay()===0) ? 7 : fromISO(dateISO).getDay();
+    const onLeave = state.cache.events.some(e=>e.type==='techAbsence' && e.technicianId===t.id && e.date===dateISO);
+    if(onLeave) awayTag = `<span class="badge badge-neutral">On leave</span>`;
+    else if(!workDays.includes(isoDow)) awayTag = `<span class="badge badge-neutral">Not a work day</span>`;
+    return `
+    <div class="watch-row">
+      <button class="et-check ${attendedIds.has(t.id)?'is-done':''}" data-hr-toggle="${t.id}" title="${attendedIds.has(t.id)?'Mark not attended':'Mark attended'}">✓</button>
+      <div class="watch-name">${escapeHTML(t.name)}</div>
+      <div class="watch-spacer"></div>
+      ${awayTag}
+      ${regionBadge(t.region)}
+    </div>`;
+  }).join('');
+
+  return `
+  <div class="view-head">
+    <div><h1>Huddle Register</h1><div class="view-sub">Daily huddle attendance — ${humanDate(dateISO)}</div></div>
+    <div class="view-actions">
+      <button class="btn btn-outline" id="hrPrev">‹ Prev day</button>
+      <button class="btn btn-outline" id="hrToday">Today</button>
+      <button class="btn btn-outline" id="hrNext">Next day ›</button>
+    </div>
+  </div>
+  ${isNonWorkingNote}
+  <div class="kpi-grid" style="margin-bottom:18px;">
+    <div class="card kpi-card">
+      <div class="kpi-label">Attended</div>
+      <div class="kpi-value">${attendedIds.size} <span style="font-size:15px;color:var(--text-dim);">/ ${techs.length} technicians</span></div>
+    </div>
+  </div>
+  ${techs.length ? `<div class="card" style="padding:6px 8px;">${rows}</div>` : `<div class="card empty"><h3>No technicians yet</h3><p>Add technicians to see them here.</p></div>`}
+  `;
+}
+function mountHuddleRegister(){
+  document.getElementById('hrPrev').addEventListener('click', ()=>{ state.huddleDate = addDays(state.huddleDate,-1); render(); });
+  document.getElementById('hrNext').addEventListener('click', ()=>{ state.huddleDate = addDays(state.huddleDate,1); render(); });
+  document.getElementById('hrToday').addEventListener('click', ()=>{ state.huddleDate = new Date(); render(); });
+  document.querySelectorAll('[data-hr-toggle]').forEach(b=>b.addEventListener('click', async ()=>{
+    const technicianId = Number(b.dataset.hrToggle);
+    const dateISO = toISO(state.huddleDate);
+    const existing = state.cache.huddleAttendance.find(a=>a.technicianId===technicianId && a.date===dateISO);
+    if(existing){
+      await DB.put('huddle_attendance', { ...existing, attended: !existing.attended });
+    } else {
+      await DB.add('huddle_attendance', { technicianId, date: dateISO, eventId: null, attended: true, createdAt: new Date().toISOString() });
+    }
+    await refreshCache();
+    render();
+  }));
+}
+
 /* ================= REPORTS ================= */
 function isTechWorkingOn(technician, iso){
   // true if this is a day the technician is actually expected to be working:
@@ -1932,16 +1999,16 @@ function isTechWorkingOn(technician, iso){
   return true;
 }
 function buildHuddleAttendanceReport(startISO, endISO){
-  // Huddles that fall on a technician's holiday or non-work day don't count against
-  // them at all — the denominator is "huddles they were actually expected at", not
-  // every huddle that happened to occur in the range.
-  const huddleEvents = state.cache.events.filter(e=>e.type==='block' && e.date>=startISO && e.date<=endISO);
+  // Decoupled from any calendar event entirely — a "huddle happened" is just
+  // any date with attendance logged (whether via the standalone Huddle
+  // Register, or an old-style event log from before that existed).
+  const attendance = state.cache.huddleAttendance.filter(a=>a.date && a.date>=startISO && a.date<=endISO);
+  const huddleDates = [...new Set(attendance.map(a=>a.date))];
   const techs = state.cache.technicians.filter(t=>t.active);
-  const attendance = state.cache.huddleAttendance;
   return techs.map(t=>{
-    const applicableHuddles = huddleEvents.filter(e=>isTechWorkingOn(t, e.date));
-    const attended = attendance.filter(a=>a.technicianId===t.id && a.attended && applicableHuddles.some(e=>e.id===a.eventId)).length;
-    const total = applicableHuddles.length;
+    const applicableDates = huddleDates.filter(d=>isTechWorkingOn(t, d));
+    const attended = applicableDates.filter(d=>attendance.some(a=>a.date===d && a.technicianId===t.id && a.attended)).length;
+    const total = applicableDates.length;
     return { Technician: t.name, 'Huddles in range': total, Attended: attended, 'Attendance %': total ? Math.round(attended/total*100)+'%' : '—' };
   });
 }
@@ -3793,6 +3860,14 @@ function renderSettings(){
       <input id="outlookIcsUrlInput" value="${escapeHTML(s.outlookIcsUrl||'')}" placeholder="https://outlook.office365.com/owa/calendar/…/reachcalendar.ics">
       <div class="freq-hint">From Outlook: Settings → Calendar → Shared calendars → Publish a calendar → copy the ICS link. Treat this link like a password — anyone with it can see your calendar.</div>
     </div>
+    <div class="field">
+      <label>Conflict warnings</label>
+      <div class="chip-filter">
+        <button class="chip ${s.outlookShowConflicts!==false?'active':''}" data-outlook-conflicts="true">Show</button>
+        <button class="chip ${s.outlookShowConflicts===false?'active':''}" data-outlook-conflicts="false">Hide</button>
+      </div>
+      <div class="freq-hint">A ⚠ appears on entries that overlap with something else that day.</div>
+    </div>
     <div style="font-size:11.5px;color:var(--text-dim);margin-bottom:10px;">${outlookSyncStatusLabel(s) ? outlookSyncStatusLabel(s).replace(' · ','') : 'Not synced yet'}</div>
     <button class="btn btn-outline btn-small" id="settingsSyncOutlookBtn">🔄 Sync now</button>
   </div>
@@ -4048,6 +4123,12 @@ function mountSettings(){
     toast('Calendar link saved');
   });
   document.getElementById('settingsSyncOutlookBtn').addEventListener('click', (e)=>runOutlookSync(e.currentTarget));
+  document.querySelectorAll('[data-outlook-conflicts]').forEach(b=>b.addEventListener('click', async ()=>{
+    const current = state.cache.settings || {};
+    await DB.put('settings', { id:'settings', ...current, outlookShowConflicts: b.dataset.outlookConflicts==='true' });
+    await refreshCache();
+    render();
+  }));
   document.getElementById('addOutlookRuleBtn').addEventListener('click', ()=>openOutlookRuleForm());
   document.querySelectorAll('[data-edit-outlook-rule]').forEach(b=>b.addEventListener('click', ()=>openOutlookRuleForm(Number(b.dataset.editOutlookRule))));
   document.querySelectorAll('[data-del-outlook-rule]').forEach(b=>b.addEventListener('click', async ()=>{
