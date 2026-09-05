@@ -698,7 +698,7 @@ function outlookEventTagHTML(oe, isConflict){
       <div class="et-body">
         <div class="et-type">${t.short}${isConflict?' <span class="conflict-flag" title="Conflicts with another entry">⚠</span>':''}</div>
         <div class="et-title">${escapeHTML(oe.title)}</div>
-        <div class="et-meta">${escapeHTML(oe.allDay?'All day':(oe.startTime||''))}</div>
+        <div class="et-meta">${escapeHTML(timeLabel)}</div>
       </div>
       <span class="synced-ico" title="From Outlook">📅</span>
     </div>`;
