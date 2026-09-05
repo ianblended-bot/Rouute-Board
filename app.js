@@ -92,6 +92,23 @@ const state = {
   cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[], problemSessions:[], outlookEvents:[], outlookTypeRules:[] },
 };
 
+const PRIORITY_RANK = { urgent:0, high:1, medium:2, low:3 };
+const PRIORITY_META = {
+  urgent: { label:'Urgent', color:'#B0281A', bg:'#FBE0D8' },
+  high:   { label:'High',   color:'#8A6110', bg:'#FBF0D7' },
+  medium: { label:'Medium', color:'#2C5580', bg:'#E1EBF5' },
+  low:    { label:'Low',    color:'#6B6B5E', bg:'#F1EEE3' },
+};
+function sortTodos(a, b){
+  const aDate = a.dueDate || null, bDate = b.dueDate || null;
+  if(aDate && !bDate) return -1;
+  if(!aDate && bDate) return 1;
+  if(aDate && bDate && aDate !== bDate) return aDate.localeCompare(bDate);
+  const aRank = PRIORITY_RANK[a.priority] ?? 2;
+  const bRank = PRIORITY_RANK[b.priority] ?? 2;
+  if(aRank !== bRank) return aRank - bRank;
+  return new Date(b.createdAt) - new Date(a.createdAt); // final tiebreaker: newest first
+}
 async function refreshCache(){
   const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules] = await Promise.all([
     DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples'), DB.getAll('email_drafts'), DB.getAll('content_analyses'), DB.getAll('problem_sessions'), DB.getAll('outlook_events'), DB.getAll('outlook_type_rules')
@@ -100,7 +117,7 @@ async function refreshCache(){
   sites.sort((a,b)=>a.name.localeCompare(b.name));
   events.sort((a,b)=>a.date.localeCompare(b.date));
   recurringBlocks.sort((a,b)=>a.weekday-b.weekday);
-  todos.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)); // newest first
+  todos.sort(sortTodos); // due date first (undated last), priority breaks ties, newest breaks further ties
   zones.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
   eventTypes.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
   emailVoiceSamples.sort((a,b)=> new Date(a.createdAt) - new Date(b.createdAt));
@@ -2226,6 +2243,12 @@ function getFilteredTodos(filter){
   else if(f==='completed') list = list.filter(t=>t.completed);
   return list; // already sorted newest-first in refreshCache
 }
+function todoPriorityBadge(t){
+  const key = t.priority && PRIORITY_META[t.priority] ? t.priority : 'medium';
+  if(key === 'medium') return ''; // medium is the quiet default — no need to call it out
+  const m = PRIORITY_META[key];
+  return `<span class="p-badge" style="color:${m.color};background:${m.bg};">${m.label}</span>`;
+}
 function todoDueBadge(t){
   if(!t.dueDate) return '';
   const today = todayISO();
@@ -2270,16 +2293,19 @@ function renderTodos(){
     list = getFilteredTodos();
   }
 
-  const rows = list.map(t=>`
-    <div class="todo-row-min ${t.completed?'is-done':''}">
+  const rows = list.map(t=>{
+    const pMeta = PRIORITY_META[t.priority] || PRIORITY_META.medium;
+    return `
+    <div class="todo-row-min ${t.completed?'is-done':''}" style="border-left:3px solid ${pMeta.color};">
       <button class="et-check ${t.completed?'is-done':''}" data-toggle-todo="${t.id}" title="${t.completed?'Mark not done':'Mark done'}">✓</button>
       <div class="todo-body">
         <div class="todo-text">${escapeHTML(t.text)}</div>
-        ${mode!=='day' ? `<div class="todo-meta">${todoDueBadge(t)}${todoAlertBadge(t)}${todoSourceBadge(t)}</div>` : (todoAlertBadge(t) ? `<div class="todo-meta">${todoAlertBadge(t)}</div>` : '')}
+        <div class="todo-meta">${todoPriorityBadge(t)}${mode!=='day' ? `${todoDueBadge(t)}${todoAlertBadge(t)}${todoSourceBadge(t)}` : (todoAlertBadge(t) || '')}</div>
       </div>
       <button class="todo-kebab" data-todo-menu="${t.id}" aria-label="Task options">⋯</button>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   const emptyMsg = mode==='day'
     ? 'Nothing due this day.'
@@ -2377,13 +2403,20 @@ function mountTodos(){
 }
 function openTodoForm(editId){
   const existing = editId ? state.cache.todos.find(t=>t.id===editId) : null;
-  const v = existing || { text:'', dueDate: todayISO(), alertAt:null, completed:false };
+  const v = existing || { text:'', dueDate: todayISO(), alertAt:null, completed:false, priority:'medium' };
   const alertLocal = v.alertAt ? new Date(v.alertAt) : null;
   const alertDateVal = alertLocal ? toISO(alertLocal) : '';
   const alertTimeVal = alertLocal ? `${String(alertLocal.getHours()).padStart(2,'0')}:${String(alertLocal.getMinutes()).padStart(2,'0')}` : '';
 
+  const priority = v.priority && PRIORITY_META[v.priority] ? v.priority : 'medium';
   const body = `
     <div class="field"><label>Task</label><textarea id="tdText" placeholder="What needs doing?">${escapeHTML(v.text)}</textarea></div>
+    <div class="field">
+      <label>Priority</label>
+      <div class="chip-filter">
+        ${Object.keys(PRIORITY_META).map(k=>`<button class="chip ${priority===k?'active':''}" data-td-priority="${k}" style="${priority===k?`background:${PRIORITY_META[k].color};border-color:${PRIORITY_META[k].color};`:''}">${PRIORITY_META[k].label}</button>`).join('')}
+      </div>
+    </div>
     <div class="field"><label>Due date (optional)</label><input type="date" id="tdDue" value="${v.dueDate||''}"></div>
     <div class="field-row">
       <div class="field"><label>Alert date (optional)</label><input type="date" id="tdAlertDate" value="${alertDateVal}"></div>
@@ -2397,6 +2430,17 @@ function openTodoForm(editId){
     <div class="modal-foot-right"><button class="btn btn-outline" id="tdCancel">Cancel</button><button class="btn" id="tdSave">${existing?'Save':'Add task'}</button></div>
   `;
   showModal(existing?'Edit task':'New task', body, foot);
+  let selectedPriority = priority;
+  document.querySelectorAll('[data-td-priority]').forEach(chip=>chip.addEventListener('click', ()=>{
+    selectedPriority = chip.dataset.tdPriority;
+    document.querySelectorAll('[data-td-priority]').forEach(c=>{
+      const isActive = c.dataset.tdPriority === selectedPriority;
+      c.classList.toggle('active', isActive);
+      const m = PRIORITY_META[c.dataset.tdPriority];
+      c.style.background = isActive ? m.color : '';
+      c.style.borderColor = isActive ? m.color : '';
+    });
+  }));
   document.getElementById('tdCancel').addEventListener('click', closeModal);
   document.getElementById('tdDelete')?.addEventListener('click', async ()=>{
     await DB.delete('todos', editId);
@@ -2412,6 +2456,7 @@ function openTodoForm(editId){
     const obj = {
       text,
       dueDate,
+      priority: selectedPriority,
       alertAt,
       alertFired: (existing && existing.alertAt===alertAt) ? existing.alertFired : false, // reset if the alert time changed
       completed: existing ? document.getElementById('tdCompleted').checked : false,
@@ -2453,6 +2498,7 @@ async function bulkRolloverTodos(newDate, ids){
 function buildTodoExportRows(){
   return getFilteredTodos().map(t=>({
     Task: t.text,
+    Priority: PRIORITY_META[t.priority] ? PRIORITY_META[t.priority].label : 'Medium',
     Due: t.dueDate || '',
     Alert: t.alertAt ? new Date(t.alertAt).toLocaleString('en-GB') : '',
     Completed: t.completed ? 'Yes' : 'No',
@@ -2474,8 +2520,8 @@ function openTodoExportModal(){
     else await exportPDF(rows, filename, null, null, {
       title: 'Route Board — To-Do List',
       subtitle: `Exported ${humanDate(todayISO())}`,
-      headers: ['Task','Due','Alert','Completed','Created'],
-      bodyRows: rows.map(r=>[r.Task, r.Due, r.Alert, r.Completed, r.Created]),
+      headers: ['Task','Priority','Due','Alert','Completed','Created'],
+      bodyRows: rows.map(r=>[r.Task, r.Priority, r.Due, r.Alert, r.Completed, r.Created]),
       orientation: 'portrait',
     });
     closeModal();
