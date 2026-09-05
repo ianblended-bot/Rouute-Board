@@ -29,12 +29,7 @@ function zoneByKey(key){
   if(!key) return UNZONED;
   return zoneList().find(z=>z.key===key) || UNZONED;
 }
-function renderZoneKeySidebar(){
-  const el = document.getElementById('zoneKeyList');
-  if(!el) return;
-  el.innerHTML = zoneList().map(z=>`<div class="river-key-row"><span class="dot" style="background:${z.color};"></span>${escapeHTML(z.label)}</div>`).join('')
-    || `<div class="river-key-row" style="color:#8A8578;">No zones yet</div>`;
-}
+
 /* ---------------- event type metadata (dynamic — see Settings > Event types) ---------------- */
 const FALLBACK_EVENT_TYPE = { key:'other', label:'Other / admin', short:'Other', color:'#2C6E8C', isSystem:true };
 const EMAIL_STYLES = { formal:'Formal', relaxed:'Relaxed', friendly:'Friendly' };
@@ -94,6 +89,7 @@ const state = {
   psLoading: false,
   settingsExpanded: {}, // { [sectionId]: true } means expanded; absent/false = collapsed (the default)
   reportsExpanded: {},
+  boardMobileDate: new Date(), // which single day the mobile Weekly Board is showing
   todoViewDate: new Date(),
   cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[], problemSessions:[], outlookEvents:[], outlookTypeRules:[] },
 };
@@ -270,14 +266,14 @@ function navigate(route){
   }
   document.getElementById('topbarTitle').textContent = ROUTE_TITLES[route] || '';
   document.getElementById('app').classList.remove('nav-open');
-  document.getElementById('topbarSettings').hidden = !(route === 'todos' || route === 'compose' || route === 'assistant' || route === 'problemsolver');
+  document.getElementById('topbarSettings').hidden = !(route === 'todos' || route === 'compose' || route === 'assistant' || route === 'problemsolver' || route === 'schedule');
   render();
 }
 
 async function render(){
   const main = document.getElementById('main');
   await refreshCache();
-  renderZoneKeySidebar();
+  applyNavGroupOrder();
   if(state.route === 'schedule' || state.route === 'dashboard'){
     const created = await materializeRecurringBlocks(toISO(state.weekStart), toISO(addDays(state.weekStart,6)));
     if(created) await refreshCache();
@@ -495,19 +491,6 @@ function renderDashboard(){
         <div class="panel-title"><h3>Due within 7 days</h3></div>
         <div class="panel-body">${dueSoonTechRows}${dueSoonSiteRows}</div>
       </div>
-      <div class="card">
-        <div class="panel-title"><h3>Zone key</h3></div>
-        <div class="panel-body" style="padding:14px 18px;">
-          <p style="font-size:12.5px;color:var(--text-dim);line-height:1.7;">
-            Technicians are grouped by zone, so you can plan back-to-back visits without crossing town.
-            Edit your zones any time in Settings.<br><br>
-            ${zoneList().map(z=>{
-              const members = state.cache.technicians.filter(t=>t.active && t.region===z.key).map(t=>escapeHTML(t.name.split(' ')[0])).join(' · ');
-              return `${regionBadge(z.key)} ${members || '<span style="color:var(--text-faint);">No technicians yet</span>'}<br><br>`;
-            }).join('')}
-          </p>
-        </div>
-      </div>
     </div>
   </div>
   `;
@@ -596,11 +579,15 @@ async function runOutlookSync(btn){
     render();
   }
 }
+function isMobileViewport(){
+  return window.matchMedia('(max-width: 880px)').matches;
+}
 function renderSchedule(){
+  const s = state.cache.settings || { wfhWeekday:3 };
+  if(isMobileViewport()) return renderScheduleMobile(s);
   const ws = state.weekStart;
   const days = Array.from({length:7}, (_,i)=>addDays(ws,i));
   const todayIso = todayISO();
-  const s = state.cache.settings || { wfhWeekday:3 };
 
   const dayCols = days.map((d,i)=>{
     const iso = toISO(d);
@@ -644,6 +631,55 @@ function renderSchedule(){
   </div>
   <div class="board">${dayCols}</div>
   `;
+}
+function renderScheduleMobile(s){
+  const viewDate = state.boardMobileDate || new Date();
+  const iso = toISO(viewDate);
+  const isToday = iso === todayISO();
+  const jsDow = viewDate.getDay(); // 0=Sun..6=Sat
+  const isoDow = jsDow===0 ? 7 : jsDow; // 1=Mon..7=Sun
+
+  const evs = state.cache.events.filter(e=>e.date===iso && e.type!=='techAbsence');
+  const outlookEvs = (state.cache.outlookEvents||[]).filter(o=>o.date===iso);
+  const conflicts = s.outlookShowConflicts===false ? new Set() : computeOutlookConflicts(outlookEvs, evs);
+  const merged = [
+    ...evs.map(e=>({ sortKey: e.time || '', html: eventTagHTML(e, conflicts.has('rb_'+e.id)) })),
+    ...outlookEvs.map(o=>({ sortKey: o.allDay ? '' : (o.startTime||''), html: outlookEventTagHTML(o, conflicts.has(o.uid)) })),
+  ].sort((a,b)=>a.sortKey.localeCompare(b.sortKey));
+  const evHTML = merged.map(m=>m.html).join('');
+
+  return `
+  <div class="view-head">
+    <div><h1>Weekly board</h1><div class="view-sub">${outlookSyncStatusLabel(s) || 'Plan tech visits, QA visits and 1-1s'}</div></div>
+  </div>
+  <div class="board-daynav">
+    <button class="nav-arrow" id="boardMobilePrev" aria-label="Previous day">‹</button>
+    <div class="bm-day-label">
+      <div class="bm-day-name">${DOW_SHORT[isoDow-1]} ${humanDateShort(iso)}</div>
+      ${isToday ? '<div class="bm-day-tag">Today</div>' : (isoDow===s.wfhWeekday ? '<div class="bm-day-tag" style="color:var(--text-faint);">WFH day</div>' : '')}
+    </div>
+    <button class="nav-arrow" id="boardMobileNext" aria-label="Next day">›</button>
+  </div>
+  <div class="board-mobile-list">
+    ${evHTML || `<p style="font-size:12px;color:var(--text-faint);text-align:center;margin-top:24px;">Nothing scheduled.</p>`}
+  </div>
+  <button class="btn btn-outline" id="boardMobileAddBtn" style="width:100%;justify-content:center;margin-top:14px;">+ Add event</button>
+  `;
+}
+function openBoardMobileActionsModal(){
+  const body = `
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <button class="btn btn-outline" id="bmGenerate" style="justify-content:center;">✦ Generate schedule</button>
+      <button class="btn btn-outline" id="bmSync" style="justify-content:center;">🔄 Sync calendar</button>
+      <button class="btn btn-outline" id="bmExport" style="justify-content:center;">⬇ Export</button>
+    </div>
+  `;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="bmClose">Close</button></div>`;
+  showModal('Weekly board actions', body, foot);
+  document.getElementById('bmGenerate').addEventListener('click', ()=>{ closeModal(); openGenerateModal(); });
+  document.getElementById('bmSync').addEventListener('click', (e)=>{ closeModal(); runOutlookSync(); });
+  document.getElementById('bmExport').addEventListener('click', ()=>{ closeModal(); openExportModal(); });
+  document.getElementById('bmClose').addEventListener('click', closeModal);
 }
 function toMinutes(hhmm){
   if(!hhmm) return null;
@@ -774,23 +810,22 @@ async function toggleEventComplete(id){
   render();
 }
 function mountSchedule(){
-  document.getElementById('wkPrev').addEventListener('click', ()=>{ state.weekStart = addDays(state.weekStart,-7); render(); });
-  document.getElementById('wkNext').addEventListener('click', ()=>{ state.weekStart = addDays(state.weekStart,7); render(); });
-  document.getElementById('wkToday').addEventListener('click', ()=>{ state.weekStart = mondayOf(new Date()); render(); });
-  document.getElementById('addEventBtn').addEventListener('click', ()=>openEventForm({ date: toISO(state.weekStart) }));
-  document.getElementById('genScheduleBtn').addEventListener('click', ()=>openGenerateModal());
-  document.getElementById('syncOutlookBtn').addEventListener('click', (e)=>runOutlookSync(e.currentTarget));
-  document.getElementById('exportBtn').addEventListener('click', ()=>openExportModal());
+  document.getElementById('wkPrev')?.addEventListener('click', ()=>{ state.weekStart = addDays(state.weekStart,-7); render(); });
+  document.getElementById('wkNext')?.addEventListener('click', ()=>{ state.weekStart = addDays(state.weekStart,7); render(); });
+  document.getElementById('wkToday')?.addEventListener('click', ()=>{ state.weekStart = mondayOf(new Date()); render(); });
+  document.getElementById('addEventBtn')?.addEventListener('click', ()=>openEventForm({ date: toISO(state.weekStart) }));
+  document.getElementById('genScheduleBtn')?.addEventListener('click', ()=>openGenerateModal());
+  document.getElementById('syncOutlookBtn')?.addEventListener('click', (e)=>runOutlookSync(e.currentTarget));
+  document.getElementById('exportBtn')?.addEventListener('click', ()=>openExportModal());
   document.querySelectorAll('[data-add-day]').forEach(b=>b.addEventListener('click', ()=>openEventForm({ date:b.dataset.addDay })));
   document.querySelectorAll('[data-open-event]').forEach(b=>b.addEventListener('click', ()=>openEventForm(null, Number(b.dataset.openEvent))));
   document.querySelectorAll('[data-toggle-complete]').forEach(b=>b.addEventListener('click', (e)=>{
     e.stopPropagation();
     toggleEventComplete(Number(b.dataset.toggleComplete));
   }));
-  // on the mobile swipeable board, bring today's card into view automatically
-  if(window.innerWidth <= 880){
-    document.querySelector('.day-sheet.is-today')?.scrollIntoView({ inline:'center', block:'nearest' });
-  }
+  document.getElementById('boardMobilePrev')?.addEventListener('click', ()=>{ state.boardMobileDate = addDays(state.boardMobileDate||new Date(), -1); render(); });
+  document.getElementById('boardMobileNext')?.addEventListener('click', ()=>{ state.boardMobileDate = addDays(state.boardMobileDate||new Date(), 1); render(); });
+  document.getElementById('boardMobileAddBtn')?.addEventListener('click', ()=>openEventForm({ date: toISO(state.boardMobileDate||new Date()) }));
 }
 
 /* ---------- event form ---------- */
@@ -4504,6 +4539,54 @@ function confirmResetAll(){
 }
 
 /* ================= boot ================= */
+const NAV_GROUP_LABELS = { tracking:'Tracking', smart:'Smart tools', directory:'Directory', more:'More' };
+function applyNavGroupOrder(){
+  const order = (state.cache.settings || {}).navGroupOrder;
+  const finalOrder = (order && order.length) ? order : ['tracking','smart','directory','more'];
+  const container = document.querySelector('.nav-group');
+  if(!container) return;
+  finalOrder.forEach(key=>{
+    const head = document.querySelector(`.nav-group-head[data-nav-group="${key}"]`);
+    const subgroup = document.querySelector(`.nav-subgroup[data-nav-subgroup="${key}"]`);
+    if(head) container.appendChild(head);
+    if(subgroup) container.appendChild(subgroup);
+  });
+}
+function openNavReorderModal(){
+  const current = state.cache.settings || {};
+  const order = (current.navGroupOrder && current.navGroupOrder.length) ? current.navGroupOrder : ['tracking','smart','directory','more'];
+  const rows = order.map((key,i)=>`
+    <div class="reorder-row">
+      <span class="reorder-handle">☰</span>
+      <span class="reorder-label">${NAV_GROUP_LABELS[key]}</span>
+      <div class="reorder-arrows">
+        <button class="reorder-arrow-btn" data-move="up" data-key="${key}" ${i===0?'disabled':''}>▲</button>
+        <button class="reorder-arrow-btn" data-move="down" data-key="${key}" ${i===order.length-1?'disabled':''}>▼</button>
+      </div>
+    </div>`).join('');
+  const body = `
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:14px;">Move items up or down to match how you use them. Dashboard and Weekly board always stay first.</p>
+    <div id="reorderRows">${rows}</div>
+  `;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn" id="reorderDone">Done</button></div>`;
+  showModal('Reorder menu', body, foot);
+  document.querySelectorAll('[data-move]').forEach(b=>b.addEventListener('click', async ()=>{
+    const key = b.dataset.key;
+    const dir = b.dataset.move;
+    const currentSettings = state.cache.settings || {};
+    const ord = (currentSettings.navGroupOrder && currentSettings.navGroupOrder.length) ? [...currentSettings.navGroupOrder] : ['tracking','smart','directory','more'];
+    const idx = ord.indexOf(key);
+    const swapIdx = dir==='up' ? idx-1 : idx+1;
+    if(idx===-1 || swapIdx<0 || swapIdx>=ord.length) return;
+    [ord[idx], ord[swapIdx]] = [ord[swapIdx], ord[idx]];
+    await DB.put('settings', { id:'settings', ...currentSettings, navGroupOrder: ord });
+    await refreshCache();
+    applyNavGroupOrder();
+    closeModal();
+    openNavReorderModal();
+  }));
+  document.getElementById('reorderDone').addEventListener('click', ()=>{ closeModal(); });
+}
 function initNav(){
   document.querySelectorAll('.nav-item[data-route]').forEach(b=>b.addEventListener('click', ()=>navigate(b.dataset.route)));
   document.querySelector('.search-ico-btn[data-route]')?.addEventListener('click', (e)=>navigate(e.currentTarget.dataset.route));
@@ -4538,15 +4621,20 @@ function initNav(){
       resetProblemSolver();
       render();
     }
+    else if(state.route==='schedule'){
+      openEventForm({ date: toISO(state.boardMobileDate||new Date()) });
+    }
     else openEventForm({ date: todayISO() });
   });
   document.getElementById('topbarSettings').addEventListener('click', ()=>{
     if(state.route==='compose') openEmailSettingsModal();
     else if(state.route==='assistant') openAssistantSettingsModal();
     else if(state.route==='problemsolver') openProblemSolverSettingsModal();
+    else if(state.route==='schedule') openBoardMobileActionsModal();
     else openTodoSettingsModal();
   });
   document.getElementById('logoutBtn').addEventListener('click', ()=>Auth.signOut());
+  document.getElementById('navReorderBtn').addEventListener('click', ()=>openNavReorderModal());
   window.addEventListener('hashchange', ()=>{
     const r = location.hash.replace('#','') || 'dashboard';
     if(ROUTE_TITLES[r] && r !== state.route) navigate(r);

@@ -142,6 +142,7 @@ const DEFAULT_SETTINGS = {
   outlookLastSynced: null,
   outlookShowConflicts: true,
   huddleWeekdays: [1,2,3,4,5],
+  navGroupOrder: ['tracking','smart','directory','more'],
   emailAudience: 'middle_mgmt',
   emailAudienceCustom: '',
 };
