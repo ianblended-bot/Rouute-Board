@@ -77,12 +77,20 @@ a{ color:inherit; }
   position:sticky;
   top:0;
   height:100vh;
+  overflow-y:auto;
 }
 .brand{ display:flex; align-items:center; gap:10px; padding:4px 8px 22px; }
 .brand-mark{ width:30px; height:30px; color:var(--gold); flex:0 0 auto; }
-.brand-text{ display:flex; flex-direction:column; line-height:1.2; }
+.brand-text{ display:flex; flex-direction:column; line-height:1.2; flex:1; min-width:0; }
 .brand-title{ font-family:var(--font-display); font-weight:600; font-size:17px; color:#fff; }
 .brand-sub{ font-size:11px; color:#B9C4B7; letter-spacing:.04em; text-transform:uppercase; }
+.search-ico-btn{
+  flex:0 0 auto; width:30px; height:30px; border-radius:8px;
+  background:rgba(255,255,255,.06); border:none; color:#D8D3C6;
+  display:flex; align-items:center; justify-content:center;
+  transition:background .15s ease, color .15s ease;
+}
+.search-ico-btn:hover{ background:rgba(255,255,255,.12); color:#fff; }
 
 .nav-group{ display:flex; flex-direction:column; gap:2px; margin-top:6px; }
 .nav-item{
@@ -96,7 +104,21 @@ a{ color:inherit; }
 .nav-item:hover{ background:rgba(255,255,255,.06); color:#fff; }
 .nav-item.active{ background:var(--forest-dim); color:#fff; }
 
+.nav-group-head{
+  display:flex; align-items:center; justify-content:space-between; width:100%;
+  background:none; border:none; color:#8A9488;
+  padding:10px 10px 5px; margin-top:2px;
+  font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.07em;
+}
+.nav-group-head:hover{ color:#D8D3C6; }
+.nav-chevron{ transition:transform .15s ease; flex-shrink:0; }
+.nav-subgroup{ display:flex; flex-direction:column; gap:2px; overflow:hidden; }
+.nav-subgroup.is-collapsed{ display:none; }
+.nav-group-head.is-collapsed .nav-chevron{ transform:rotate(-90deg); }
+
 .sidebar-foot{ margin-top:auto; display:flex; flex-direction:column; gap:14px; }
+.foot-row{ display:flex; align-items:center; gap:6px; }
+.foot-row .nav-item{ justify-content:center; }
 .river-key{ border-top:1px dashed rgba(255,255,255,.18); padding-top:14px; }
 .river-key-title{ font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#93A093; margin-bottom:8px; }
 .river-key-row{ display:flex; align-items:center; gap:8px; font-size:12px; color:#C7C2B4; padding:3px 0; }

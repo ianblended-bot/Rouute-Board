@@ -55,22 +55,42 @@
         <span class="brand-title">Route Board</span>
         <span class="brand-sub">Field schedule</span>
       </div>
+      <button class="search-ico-btn" data-route="search" aria-label="Search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+      </button>
     </div>
 
     <div class="nav-group">
       <button class="nav-item" data-route="dashboard"><span class="nav-ico">◧</span>Dashboard</button>
-      <button class="nav-item" data-route="todos"><span class="nav-ico">☑</span>To-Do</button>
-      <button class="nav-item" data-route="compose"><span class="nav-ico">✎</span>Compose</button>
-      <button class="nav-item" data-route="assistant"><span class="nav-ico">✺</span>Assistant</button>
-      <button class="nav-item" data-route="problemsolver"><span class="nav-ico">◆</span>Problem Solver</button>
       <button class="nav-item" data-route="schedule"><span class="nav-ico">▦</span>Weekly board</button>
-      <button class="nav-item" data-route="technicians"><span class="nav-ico">◔</span>Technicians</button>
-      <button class="nav-item" data-route="sites"><span class="nav-ico">◈</span>Client sites</button>
-      <button class="nav-item" data-route="fleetcheck"><span class="nav-ico">✓</span>FleetCheck</button>
-      <button class="nav-item" data-route="huddleregister"><span class="nav-ico">◔</span>Huddle Register</button>
-      <button class="nav-item" data-route="reports"><span class="nav-ico">▤</span>Reports</button>
-      <button class="nav-item" data-route="search"><span class="nav-ico">⌕</span>Search</button>
-      <button class="nav-item" data-route="settings"><span class="nav-ico">⚙</span>Settings</button>
+
+      <button class="nav-group-head" data-nav-group="directory"><span>Directory</span><svg class="nav-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="11" height="11"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+      <div class="nav-subgroup" data-nav-subgroup="directory">
+        <button class="nav-item" data-route="technicians"><span class="nav-ico">◔</span>Technicians</button>
+        <button class="nav-item" data-route="sites"><span class="nav-ico">◈</span>Client sites</button>
+      </div>
+
+      <button class="nav-group-head" data-nav-group="smart"><span>Smart tools</span><svg class="nav-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="11" height="11"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+      <div class="nav-subgroup" data-nav-subgroup="smart">
+        <button class="nav-item" data-route="compose"><span class="nav-ico">✎</span>Compose</button>
+        <button class="nav-item" data-route="assistant"><span class="nav-ico">✺</span>Assistant</button>
+        <button class="nav-item" data-route="problemsolver"><span class="nav-ico">◆</span>Problem Solver</button>
+      </div>
+
+      <button class="nav-group-head" data-nav-group="tracking"><span>Tracking</span><svg class="nav-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="11" height="11"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+      <div class="nav-subgroup" data-nav-subgroup="tracking">
+        <button class="nav-item" data-route="todos"><span class="nav-ico">☑</span>To-Do</button>
+        <button class="nav-item" data-route="fleetcheck"><span class="nav-ico">✓</span>FleetCheck</button>
+        <button class="nav-item" data-route="huddleregister"><span class="nav-ico">◔</span>Huddle Register</button>
+      </div>
+
+      <button class="nav-group-head" data-nav-group="more"><span>More</span><svg class="nav-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="11" height="11"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+      <div class="nav-subgroup" data-nav-subgroup="more">
+        <button class="nav-item" data-route="reports"><span class="nav-ico">▤</span>Reports</button>
+      </div>
     </div>
 
     <div class="sidebar-foot">
@@ -81,7 +101,10 @@
       <div class="install-hint" id="installHint" hidden>
         <button id="installBtn" class="btn btn-ghost btn-small">Install app</button>
       </div>
-      <button class="nav-item" id="logoutBtn"><span class="nav-ico">⏻</span>Log out</button>
+      <div class="foot-row">
+        <button class="nav-item" data-route="settings" style="flex:1;"><span class="nav-ico">⚙</span>Settings</button>
+        <button class="nav-item" id="logoutBtn" style="flex:1;"><span class="nav-ico">⏻</span>Log out</button>
+      </div>
     </div>
   </nav>
 

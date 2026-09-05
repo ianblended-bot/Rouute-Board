@@ -259,6 +259,15 @@ function navigate(route){
   state.route = route;
   location.hash = route;
   document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active', b.dataset.route===route));
+  // If the active item lives inside a collapsed group, expand that group so
+  // the highlighted item is actually visible rather than hidden with no
+  // indication anything is selected.
+  const activeItem = document.querySelector(`.nav-item[data-route="${route}"]`);
+  const parentSubgroup = activeItem?.closest('.nav-subgroup');
+  if(parentSubgroup?.classList.contains('is-collapsed')){
+    parentSubgroup.classList.remove('is-collapsed');
+    document.querySelector(`.nav-group-head[data-nav-group="${parentSubgroup.dataset.navSubgroup}"]`)?.classList.remove('is-collapsed');
+  }
   document.getElementById('topbarTitle').textContent = ROUTE_TITLES[route] || '';
   document.getElementById('app').classList.remove('nav-open');
   document.getElementById('topbarSettings').hidden = !(route === 'todos' || route === 'compose' || route === 'assistant' || route === 'problemsolver');
@@ -4497,6 +4506,18 @@ function confirmResetAll(){
 /* ================= boot ================= */
 function initNav(){
   document.querySelectorAll('.nav-item[data-route]').forEach(b=>b.addEventListener('click', ()=>navigate(b.dataset.route)));
+  document.querySelector('.search-ico-btn[data-route]')?.addEventListener('click', (e)=>navigate(e.currentTarget.dataset.route));
+  document.querySelectorAll('.nav-group-head').forEach(head=>{
+    const key = head.dataset.navGroup;
+    const subgroup = document.querySelector(`[data-nav-subgroup="${key}"]`);
+    // Default collapsed, consistent with Settings/Reports.
+    head.classList.add('is-collapsed');
+    subgroup?.classList.add('is-collapsed');
+    head.addEventListener('click', ()=>{
+      head.classList.toggle('is-collapsed');
+      subgroup?.classList.toggle('is-collapsed');
+    });
+  });
   document.getElementById('hamburger').addEventListener('click', ()=>document.getElementById('app').classList.toggle('nav-open'));
   document.getElementById('topbarAdd').addEventListener('click', ()=>{
     if(state.route==='todos') openTodoForm();
