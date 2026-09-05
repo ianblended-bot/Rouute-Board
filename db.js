@@ -141,6 +141,7 @@ const DEFAULT_SETTINGS = {
   outlookIcsUrl: '',
   outlookLastSynced: null,
   outlookShowConflicts: true,
+  huddleWeekdays: [1,2,3,4,5],
   emailAudience: 'middle_mgmt',
   emailAudienceCustom: '',
 };

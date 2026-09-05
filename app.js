@@ -1924,22 +1924,24 @@ function mountFleetCheck(){
 
 /* ================= HUDDLE REGISTER ================= */
 function renderHuddleRegister(){
+  const s = state.cache.settings || {};
+  const huddleDays = (s.huddleWeekdays && s.huddleWeekdays.length) ? s.huddleWeekdays : [1,2,3,4,5];
   const dateISO = toISO(state.huddleDate);
   const techs = state.cache.technicians.filter(t=>t.active);
   const attendedIds = new Set(state.cache.huddleAttendance.filter(a=>a.date===dateISO && a.attended).map(a=>a.technicianId));
 
-  const dow = fromISO(dateISO).getDay();
-  const isNonWorkingNote = (dow===0||dow===6)
-    ? `<p style="font-size:12px;color:var(--text-faint);margin:-8px 0 14px;">Weekend — not counted as a required day in Reports, but you can still log attendance here if a huddle happened.</p>`
+  const isoDowToday = (fromISO(dateISO).getDay()===0) ? 7 : fromISO(dateISO).getDay();
+  const isHuddleDay = huddleDays.includes(isoDowToday);
+  const dayNote = !isHuddleDay
+    ? `<p style="font-size:12px;color:var(--text-faint);margin:-8px 0 14px;">Not one of your configured huddle days — you can still log attendance here, but it won't count toward the Reports figures.</p>`
     : '';
 
   const rows = techs.map(t=>{
     let awayTag = '';
     const workDays = (t.workDays && t.workDays.length) ? t.workDays : [1,2,3,4,5];
-    const isoDow = (fromISO(dateISO).getDay()===0) ? 7 : fromISO(dateISO).getDay();
     const onLeave = state.cache.events.some(e=>e.type==='techAbsence' && e.technicianId===t.id && e.date===dateISO);
     if(onLeave) awayTag = `<span class="badge badge-neutral">On leave</span>`;
-    else if(!workDays.includes(isoDow)) awayTag = `<span class="badge badge-neutral">Not a work day</span>`;
+    else if(!workDays.includes(isoDowToday)) awayTag = `<span class="badge badge-neutral">Not a work day</span>`;
     return `
     <div class="watch-row">
       <button class="et-check ${attendedIds.has(t.id)?'is-done':''}" data-hr-toggle="${t.id}" title="${attendedIds.has(t.id)?'Mark not attended':'Mark attended'}">✓</button>
@@ -1952,14 +1954,15 @@ function renderHuddleRegister(){
 
   return `
   <div class="view-head">
-    <div><h1>Huddle Register</h1><div class="view-sub">Daily huddle attendance — ${humanDate(dateISO)}</div></div>
+    <div><h1>Huddle Register</h1><div class="view-sub">Daily huddle attendance — ${humanDate(dateISO)}${isHuddleDay?'':' · not a huddle day'}</div></div>
     <div class="view-actions">
       <button class="btn btn-outline" id="hrPrev">‹ Prev day</button>
       <button class="btn btn-outline" id="hrToday">Today</button>
       <button class="btn btn-outline" id="hrNext">Next day ›</button>
+      <button class="btn btn-outline" id="hrSettingsBtn">⋯ Settings</button>
     </div>
   </div>
-  ${isNonWorkingNote}
+  ${dayNote}
   <div class="kpi-grid" style="margin-bottom:18px;">
     <div class="card kpi-card">
       <div class="kpi-label">Attended</div>
@@ -1969,10 +1972,37 @@ function renderHuddleRegister(){
   ${techs.length ? `<div class="card" style="padding:6px 8px;">${rows}</div>` : `<div class="card empty"><h3>No technicians yet</h3><p>Add technicians to see them here.</p></div>`}
   `;
 }
+function openHuddleSettingsModal(){
+  const s = state.cache.settings || {};
+  const huddleDays = (s.huddleWeekdays && s.huddleWeekdays.length) ? s.huddleWeekdays : [1,2,3,4,5];
+  const body = `
+    <div class="field">
+      <label>Which days do huddles actually happen?</label>
+      <div class="chip-filter">
+        ${DOW_SHORT.map((d,i)=>`<button class="chip ${huddleDays.includes(i+1)?'active':''}" data-hr-weekday="${i+1}">${d}</button>`).join('')}
+      </div>
+      <div class="freq-hint">Only these days count toward the attendance % in Reports — logging on any other day is still fine, it just won't be included in the figures.</div>
+    </div>
+  `;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn" id="hrSettingsDone">Done</button></div>`;
+  showModal('Huddle Register settings', body, foot);
+  document.querySelectorAll('[data-hr-weekday]').forEach(b=>b.addEventListener('click', async ()=>{
+    const day = Number(b.dataset.hrWeekday);
+    const current = state.cache.settings || {};
+    const existing = (current.huddleWeekdays && current.huddleWeekdays.length) ? current.huddleWeekdays : [1,2,3,4,5];
+    const updated = existing.includes(day) ? existing.filter(d=>d!==day) : [...existing, day].sort();
+    await DB.put('settings', { id:'settings', ...current, huddleWeekdays: updated });
+    await refreshCache();
+    closeModal();
+    openHuddleSettingsModal();
+  }));
+  document.getElementById('hrSettingsDone').addEventListener('click', ()=>{ closeModal(); render(); });
+}
 function mountHuddleRegister(){
   document.getElementById('hrPrev').addEventListener('click', ()=>{ state.huddleDate = addDays(state.huddleDate,-1); render(); });
   document.getElementById('hrNext').addEventListener('click', ()=>{ state.huddleDate = addDays(state.huddleDate,1); render(); });
   document.getElementById('hrToday').addEventListener('click', ()=>{ state.huddleDate = new Date(); render(); });
+  document.getElementById('hrSettingsBtn').addEventListener('click', ()=>openHuddleSettingsModal());
   document.querySelectorAll('[data-hr-toggle]').forEach(b=>b.addEventListener('click', async ()=>{
     const technicianId = Number(b.dataset.hrToggle);
     const dateISO = toISO(state.huddleDate);
@@ -1999,11 +2029,20 @@ function isTechWorkingOn(technician, iso){
   return true;
 }
 function buildHuddleAttendanceReport(startISO, endISO){
-  // Decoupled from any calendar event entirely — a "huddle happened" is just
-  // any date with attendance logged (whether via the standalone Huddle
-  // Register, or an old-style event log from before that existed).
+  // Huddle dates are computed from the configured weekdays (Settings on the
+  // Huddle Register page), not "any date someone happened to log attendance
+  // for" — that keeps the denominator correct even if a huddle day gets
+  // missed entirely, or someone accidentally logs on the wrong day.
+  const s = state.cache.settings || {};
+  const huddleDays = (s.huddleWeekdays && s.huddleWeekdays.length) ? s.huddleWeekdays : [1,2,3,4,5];
   const attendance = state.cache.huddleAttendance.filter(a=>a.date && a.date>=startISO && a.date<=endISO);
-  const huddleDates = [...new Set(attendance.map(a=>a.date))];
+  const totalDaysInRange = daysBetween(startISO, endISO) + 1;
+  const huddleDates = [];
+  for(let i=0;i<totalDaysInRange;i++){
+    const iso = toISO(addDays(fromISO(startISO), i));
+    const isoDow = (fromISO(iso).getDay()===0) ? 7 : fromISO(iso).getDay();
+    if(huddleDays.includes(isoDow)) huddleDates.push(iso);
+  }
   const techs = state.cache.technicians.filter(t=>t.active);
   return techs.map(t=>{
     const applicableDates = huddleDates.filter(d=>isTechWorkingOn(t, d));
@@ -3775,9 +3814,9 @@ function renderSettings(){
     <div class="watch-row">
       <div><div class="watch-name">${escapeHTML(b.label)}</div><div class="watch-meta">Every ${DOW_SHORT[b.weekday-1]}${b.time?' · '+b.time:''}${rangeText}${b.active?'':' · Inactive'}</div></div>
       <div class="watch-spacer"></div>
-      <button class="icon-btn" data-clear-block="${b.id}">Clear instances</button>
+      <button class="icon-btn" data-clear-block="${b.id}" title="${b.active ? 'Wipes existing entries, but the rule is still active so it will recreate this week right away' : 'Wipes existing entries'}">Clear instances</button>
       <button class="icon-btn" data-edit-block="${b.id}">Edit</button>
-      <button class="icon-btn" data-del-block="${b.id}">Remove</button>
+      <button class="icon-btn" data-del-block="${b.id}" title="Stops it appearing at all, going forward">Remove</button>
     </div>`;
   }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No recurring blocks yet.</p>`;
   const emailSamples = state.cache.emailVoiceSamples || [];
