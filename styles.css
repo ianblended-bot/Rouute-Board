@@ -196,6 +196,13 @@ label{ display:block; font-size:12px; font-weight:600; color:var(--text-dim); ma
 .panel-title h3{ font-size:15px; }
 .panel-body{ padding:6px 8px 12px; }
 
+.panel-title[data-collapse-toggle], .collapsible-header{ cursor:pointer; user-select:none; }
+.collapsible-header{ display:flex; align-items:center; justify-content:space-between; width:100%; background:none; border:none; padding:0; margin-bottom:4px; text-align:left; font:inherit; }
+.collapse-chevron{ display:inline-block; color:var(--text-faint); font-size:11px; transition:transform .15s ease; flex-shrink:0; margin-left:10px; }
+.card.is-collapsed .panel-body, .card.is-collapsed .collapsible-body{ display:none; }
+.card.is-collapsed .panel-title{ border-bottom:none; }
+.card.is-collapsed .collapse-chevron{ transform:rotate(-90deg); }
+
 .watch-row{
   display:flex; align-items:center; gap:12px; padding:10px 12px; border-radius:var(--radius-sm);
   transition:background .12s ease;

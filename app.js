@@ -88,6 +88,8 @@ const state = {
   psChosenOption: '',
   psActionPlan: null, // { items:[string], addedFlags:[] }
   psLoading: false,
+  settingsExpanded: {}, // { [sectionId]: true } means expanded; absent/false = collapsed (the default)
+  reportsExpanded: {},
   todoViewDate: new Date(),
   cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[], problemSessions:[], outlookEvents:[], outlookTypeRules:[] },
 };
@@ -213,6 +215,14 @@ function regionBadge(region){
   return `<span class="badge" style="background:color-mix(in srgb, ${z.color} 18%, white); color:${z.color};">${escapeHTML(z.label)}</span>`;
 }
 function escapeHTML(s){ return (s??'').toString().replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function wireCollapseToggles(stateBag){
+  document.querySelectorAll('[data-collapse-toggle]').forEach(el=>el.addEventListener('click', ()=>{
+    const id = el.dataset.collapseToggle;
+    stateBag[id] = !stateBag[id];
+    render();
+  }));
+}
 
 function toast(msg){
   const el = document.getElementById('toast');
@@ -2172,6 +2182,7 @@ function renderReports(){
   const monthlyRows = buildFleetCheckMonthlyReport(startISO, endISO);
   const absenceRows = buildAbsenceReport(startISO, endISO);
 
+  const rc = state.reportsExpanded;
   return `
   <div class="view-head">
     <div><h1>Reports</h1><div class="view-sub">${humanDate(startISO)} – ${humanDate(endISO)}</div></div>
@@ -2187,23 +2198,23 @@ function renderReports(){
     <div class="field"><label>Start</label><input type="date" id="repStart" value="${startISO}"></div>
     <div class="field"><label>End</label><input type="date" id="repEnd" value="${endISO}"></div>
   </div>
-  <div class="card" style="margin-bottom:18px;">
-    <div class="panel-title"><h3>Absences &amp; Bradford Score</h3><button class="icon-btn" id="repExportAbsence">Export CSV</button></div>
+  <div class="card ${rc.absence?'':'is-collapsed'}" style="margin-bottom:18px;">
+    <div class="panel-title" data-collapse-toggle="absence"><h3>Absences &amp; Bradford Score</h3><div style="display:flex;align-items:center;gap:10px;"><button class="icon-btn" id="repExportAbsence">Export CSV</button><span class="collapse-chevron">▾</span></div></div>
     <div class="panel-body" style="padding:6px 14px 14px;">
       <p style="font-size:12px;color:var(--text-faint);margin:6px 0 12px;">Bradford Score = spells² × days, calculated from <strong>Absence</strong> entries only — booked Holiday time is shown for reference but never counted, since Bradford Factor is meant to measure unplanned absence. Usually assessed over a rolling 12 months; pick a custom range to match your own policy. Bands shown are indicative only, not a legal or company standard — adjust to your own policy.</p>
       ${reportTableHTML(absenceRows, 'No active technicians to report on.')}
     </div>
   </div>
-  <div class="card" style="margin-bottom:18px;">
-    <div class="panel-title"><h3>Huddle attendance</h3><button class="icon-btn" id="repExportHuddle">Export CSV</button></div>
+  <div class="card ${rc.huddle?'':'is-collapsed'}" style="margin-bottom:18px;">
+    <div class="panel-title" data-collapse-toggle="huddle"><h3>Huddle attendance</h3><div style="display:flex;align-items:center;gap:10px;"><button class="icon-btn" id="repExportHuddle">Export CSV</button><span class="collapse-chevron">▾</span></div></div>
     <div class="panel-body" style="padding:6px 14px 14px;">${reportTableHTML(huddleRows, 'No active technicians to report on.')}</div>
   </div>
-  <div class="card" style="margin-bottom:18px;">
-    <div class="panel-title"><h3>FleetCheck — daily</h3><button class="icon-btn" id="repExportDaily">Export CSV</button></div>
+  <div class="card ${rc.daily?'':'is-collapsed'}" style="margin-bottom:18px;">
+    <div class="panel-title" data-collapse-toggle="daily"><h3>FleetCheck — daily</h3><div style="display:flex;align-items:center;gap:10px;"><button class="icon-btn" id="repExportDaily">Export CSV</button><span class="collapse-chevron">▾</span></div></div>
     <div class="panel-body" style="padding:6px 14px 14px;">${reportTableHTML(dailyRows, 'No drivers flagged yet — edit a technician and tick "Driver" to see them here.')}</div>
   </div>
-  <div class="card">
-    <div class="panel-title"><h3>FleetCheck — monthly</h3><button class="icon-btn" id="repExportMonthly">Export CSV</button></div>
+  <div class="card ${rc.monthly?'':'is-collapsed'}">
+    <div class="panel-title" data-collapse-toggle="monthly"><h3>FleetCheck — monthly</h3><div style="display:flex;align-items:center;gap:10px;"><button class="icon-btn" id="repExportMonthly">Export CSV</button><span class="collapse-chevron">▾</span></div></div>
     <div class="panel-body" style="padding:6px 14px 14px;">${reportTableHTML(monthlyRows, 'No drivers flagged yet — edit a technician and tick "Driver" to see them here.')}</div>
   </div>
   `;
@@ -2213,26 +2224,31 @@ function mountReports(){
   document.getElementById('repStart')?.addEventListener('change', (e)=>{ state.reportsCustomStart = e.target.value; render(); });
   document.getElementById('repEnd')?.addEventListener('change', (e)=>{ state.reportsCustomEnd = e.target.value; render(); });
   const { startISO, endISO } = reportsRangeISO();
-  document.getElementById('repExportAbsence')?.addEventListener('click', ()=>{
+  document.getElementById('repExportAbsence')?.addEventListener('click', (e)=>{
+    e.stopPropagation();
     const rows = buildAbsenceReport(startISO, endISO);
     if(!rows.length){ toast('Nothing to export'); return; }
     exportCSV(rows, `absences-bradford-score_${startISO}_to_${endISO}`);
   });
-  document.getElementById('repExportHuddle')?.addEventListener('click', ()=>{
+  document.getElementById('repExportHuddle')?.addEventListener('click', (e)=>{
+    e.stopPropagation();
     const rows = buildHuddleAttendanceReport(startISO, endISO);
     if(!rows.length){ toast('Nothing to export'); return; }
     exportCSV(rows, `huddle-attendance_${startISO}_to_${endISO}`);
   });
-  document.getElementById('repExportDaily')?.addEventListener('click', ()=>{
+  document.getElementById('repExportDaily')?.addEventListener('click', (e)=>{
+    e.stopPropagation();
     const rows = buildFleetCheckDailyReport(startISO, endISO);
     if(!rows.length){ toast('Nothing to export'); return; }
     exportCSV(rows, `fleetcheck-daily_${startISO}_to_${endISO}`);
   });
-  document.getElementById('repExportMonthly')?.addEventListener('click', ()=>{
+  document.getElementById('repExportMonthly')?.addEventListener('click', (e)=>{
+    e.stopPropagation();
     const rows = buildFleetCheckMonthlyReport(startISO, endISO);
     if(!rows.length){ toast('Nothing to export'); return; }
     exportCSV(rows, `fleetcheck-monthly_${startISO}_to_${endISO}`);
   });
+  wireCollapseToggles(state.reportsExpanded);
 }
 
 /* ================= TO-DO LIST ================= */
@@ -3901,77 +3917,95 @@ function renderSettings(){
       ${t.isSystem ? '' : `<button class="icon-btn" data-del-etype="${t.id}">Remove</button>`}
     </div>`;
   }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No event types yet.</p>`;
+  const sc = state.settingsExpanded;
   return `
   <div class="view-head"><div><h1>Settings</h1><div class="view-sub">KPI targets and defaults</div></div></div>
-  <div class="card card-pad" style="max-width:480px;">
-    <div class="field-row">
-      <div class="field"><label>Min tech visits / week</label><input type="number" id="setTV" value="${s.techVisitsPerWeekMin}" min="1"></div>
-      <div class="field"><label>Min QA visits / week</label><input type="number" id="setQA" value="${s.qaVisitsPerWeekMin}" min="1"></div>
-    </div>
-    <div class="field"><label>Max 1-1s / week (generator)</label><input type="number" id="setOO" value="${s.oneOnOnesPerWeekMax||3}" min="1"></div>
-    <div class="field"><label>Working-from-home day</label>
-      <select id="setWFH">
-        ${DOW_SHORT.map((d,i)=>`<option value="${i+1}" ${s.wfhWeekday===i+1?'selected':''}>${d}</option>`).join('')}
-      </select>
-    </div>
-    <button class="btn" id="setSave">Save settings</button>
-  </div>
-  <div class="card card-pad" style="max-width:480px;margin-top:16px;">
-    <h3 style="margin-bottom:4px;">Technician zones</h3>
-    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Groups used for batching visits by area (the Thames-divide idea, or whatever suits you). The generator schedules each zone's technicians on the same days where possible.</p>
-    <div id="zoneList">${zoneRows}</div>
-    <button class="btn btn-outline btn-small" id="addZoneBtn" style="margin-top:8px;">+ Add zone</button>
-  </div>
-  <div class="card card-pad" style="max-width:480px;margin-top:16px;">
-    <h3 style="margin-bottom:4px;">Event types</h3>
-    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">The options in the "Type" dropdown when adding an event. Built-in types drive scheduling, cadence tracking, and reports, so they can be renamed and recoloured but not removed. Add your own for anything else — meetings, training, admin days.</p>
-    <div id="eventTypeList">${eventTypeRows}</div>
-    <button class="btn btn-outline btn-small" id="addEventTypeBtn" style="margin-top:8px;">+ Add event type</button>
-  </div>
-  <div class="card card-pad" style="max-width:480px;margin-top:16px;">
-    <h3 style="margin-bottom:4px;">Recurring blocked events</h3>
-    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Weekly commitments like Teams huddles or an extra WFH day. These appear on the board automatically every week but don't stop tech/QA visits being booked alongside them.</p>
-    <div id="blockList">${blockRows}</div>
-    <button class="btn btn-outline btn-small" id="addBlockBtn" style="margin-top:8px;">+ Add recurring block</button>
-  </div>
-  <div class="card card-pad" style="max-width:480px;margin-top:16px;">
-    <h3 style="margin-bottom:4px;">Email voice</h3>
-    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Paste in a few real emails you've sent — Compose uses these to match your natural tone and phrasing when drafting new ones. Set up once, update occasionally.</p>
-    <div id="emailSampleList">${emailSampleRows}</div>
-    <button class="btn btn-outline btn-small" id="addEmailSampleBtn" style="margin-top:8px;">+ Add example email</button>
-  </div>
-  <div class="card card-pad" style="max-width:480px;margin-top:16px;">
-    <h3 style="margin-bottom:4px;">Calendar Sync</h3>
-    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Show your Outlook calendar on the Weekly Board, alongside technician visits, with a flag when something overlaps.</p>
-    <div class="field">
-      <label>Outlook calendar link</label>
-      <input id="outlookIcsUrlInput" value="${escapeHTML(s.outlookIcsUrl||'')}" placeholder="https://outlook.office365.com/owa/calendar/…/reachcalendar.ics">
-      <div class="freq-hint">From Outlook: Settings → Calendar → Shared calendars → Publish a calendar → copy the ICS link. Treat this link like a password — anyone with it can see your calendar.</div>
-    </div>
-    <div class="field">
-      <label>Conflict warnings</label>
-      <div class="chip-filter">
-        <button class="chip ${s.outlookShowConflicts!==false?'active':''}" data-outlook-conflicts="true">Show</button>
-        <button class="chip ${s.outlookShowConflicts===false?'active':''}" data-outlook-conflicts="false">Hide</button>
+  <div class="card card-pad ${sc.targets?'':'is-collapsed'}" style="max-width:480px;">
+    <button class="collapsible-header" data-collapse-toggle="targets"><h3 style="margin:0;">Scheduling targets</h3><span class="collapse-chevron">▾</span></button>
+    <div class="collapsible-body">
+      <div class="field-row">
+        <div class="field"><label>Min tech visits / week</label><input type="number" id="setTV" value="${s.techVisitsPerWeekMin}" min="1"></div>
+        <div class="field"><label>Min QA visits / week</label><input type="number" id="setQA" value="${s.qaVisitsPerWeekMin}" min="1"></div>
       </div>
-      <div class="freq-hint">A ⚠ appears on entries that overlap with something else that day.</div>
+      <div class="field"><label>Max 1-1s / week (generator)</label><input type="number" id="setOO" value="${s.oneOnOnesPerWeekMax||3}" min="1"></div>
+      <div class="field"><label>Working-from-home day</label>
+        <select id="setWFH">
+          ${DOW_SHORT.map((d,i)=>`<option value="${i+1}" ${s.wfhWeekday===i+1?'selected':''}>${d}</option>`).join('')}
+        </select>
+      </div>
+      <button class="btn" id="setSave">Save settings</button>
     </div>
-    <div style="font-size:11.5px;color:var(--text-dim);margin-bottom:10px;">${outlookSyncStatusLabel(s) ? outlookSyncStatusLabel(s).replace(' · ','') : 'Not synced yet'}</div>
-    <button class="btn btn-outline btn-small" id="settingsSyncOutlookBtn">🔄 Sync now</button>
   </div>
-  <div class="card card-pad" style="max-width:480px;margin-top:16px;">
-    <h3 style="margin-bottom:4px;">Title matching</h3>
-    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Recognise these patterns in your Outlook titles so they're counted properly instead of showing as a duplicate. Checked in order — the first match wins.</p>
-    <div id="outlookRuleList">${outlookRuleRows}</div>
-    <button class="btn btn-outline btn-small" id="addOutlookRuleBtn" style="margin-top:8px;">+ Add a pattern</button>
+  <div class="card card-pad ${sc.zones?'':'is-collapsed'}" style="max-width:480px;margin-top:16px;">
+    <button class="collapsible-header" data-collapse-toggle="zones"><h3 style="margin-bottom:4px;">Technician zones</h3><span class="collapse-chevron">▾</span></button>
+    <div class="collapsible-body">
+      <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Groups used for batching visits by area (the Thames-divide idea, or whatever suits you). The generator schedules each zone's technicians on the same days where possible.</p>
+      <div id="zoneList">${zoneRows}</div>
+      <button class="btn btn-outline btn-small" id="addZoneBtn" style="margin-top:8px;">+ Add zone</button>
+    </div>
   </div>
-  <div class="card card-pad" style="max-width:480px;margin-top:16px;">
-    <h3 style="margin-bottom:8px;">Data</h3>
-    <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:12px;">Everything is stored securely in your own Supabase project, tied to your account.</p>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;">
-      <button class="btn btn-outline" id="exportBtn">Export backup (.json)</button>
-      <button class="btn btn-outline" id="clearEventsBtn">Clear schedule</button>
-      <button class="btn btn-danger" id="resetAllBtn">Reset all data</button>
+  <div class="card card-pad ${sc.etypes?'':'is-collapsed'}" style="max-width:480px;margin-top:16px;">
+    <button class="collapsible-header" data-collapse-toggle="etypes"><h3 style="margin-bottom:4px;">Event types</h3><span class="collapse-chevron">▾</span></button>
+    <div class="collapsible-body">
+      <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">The options in the "Type" dropdown when adding an event. Built-in types drive scheduling, cadence tracking, and reports, so they can be renamed and recoloured but not removed. Add your own for anything else — meetings, training, admin days.</p>
+      <div id="eventTypeList">${eventTypeRows}</div>
+      <button class="btn btn-outline btn-small" id="addEventTypeBtn" style="margin-top:8px;">+ Add event type</button>
+    </div>
+  </div>
+  <div class="card card-pad ${sc.blocks?'':'is-collapsed'}" style="max-width:480px;margin-top:16px;">
+    <button class="collapsible-header" data-collapse-toggle="blocks"><h3 style="margin-bottom:4px;">Recurring blocked events</h3><span class="collapse-chevron">▾</span></button>
+    <div class="collapsible-body">
+      <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Weekly commitments like Teams huddles or an extra WFH day. These appear on the board automatically every week but don't stop tech/QA visits being booked alongside them.</p>
+      <div id="blockList">${blockRows}</div>
+      <button class="btn btn-outline btn-small" id="addBlockBtn" style="margin-top:8px;">+ Add recurring block</button>
+    </div>
+  </div>
+  <div class="card card-pad ${sc.emailVoice?'':'is-collapsed'}" style="max-width:480px;margin-top:16px;">
+    <button class="collapsible-header" data-collapse-toggle="emailVoice"><h3 style="margin-bottom:4px;">Email voice</h3><span class="collapse-chevron">▾</span></button>
+    <div class="collapsible-body">
+      <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Paste in a few real emails you've sent — Compose uses these to match your natural tone and phrasing when drafting new ones. Set up once, update occasionally.</p>
+      <div id="emailSampleList">${emailSampleRows}</div>
+      <button class="btn btn-outline btn-small" id="addEmailSampleBtn" style="margin-top:8px;">+ Add example email</button>
+    </div>
+  </div>
+  <div class="card card-pad ${sc.calSync?'':'is-collapsed'}" style="max-width:480px;margin-top:16px;">
+    <button class="collapsible-header" data-collapse-toggle="calSync"><h3 style="margin-bottom:4px;">Calendar Sync</h3><span class="collapse-chevron">▾</span></button>
+    <div class="collapsible-body">
+      <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Show your Outlook calendar on the Weekly Board, alongside technician visits, with a flag when something overlaps.</p>
+      <div class="field">
+        <label>Outlook calendar link</label>
+        <input id="outlookIcsUrlInput" value="${escapeHTML(s.outlookIcsUrl||'')}" placeholder="https://outlook.office365.com/owa/calendar/…/reachcalendar.ics">
+        <div class="freq-hint">From Outlook: Settings → Calendar → Shared calendars → Publish a calendar → copy the ICS link. Treat this link like a password — anyone with it can see your calendar.</div>
+      </div>
+      <div class="field">
+        <label>Conflict warnings</label>
+        <div class="chip-filter">
+          <button class="chip ${s.outlookShowConflicts!==false?'active':''}" data-outlook-conflicts="true">Show</button>
+          <button class="chip ${s.outlookShowConflicts===false?'active':''}" data-outlook-conflicts="false">Hide</button>
+        </div>
+        <div class="freq-hint">A ⚠ appears on entries that overlap with something else that day.</div>
+      </div>
+      <div style="font-size:11.5px;color:var(--text-dim);margin-bottom:10px;">${outlookSyncStatusLabel(s) ? outlookSyncStatusLabel(s).replace(' · ','') : 'Not synced yet'}</div>
+      <button class="btn btn-outline btn-small" id="settingsSyncOutlookBtn">🔄 Sync now</button>
+    </div>
+  </div>
+  <div class="card card-pad ${sc.titleMatch?'':'is-collapsed'}" style="max-width:480px;margin-top:16px;">
+    <button class="collapsible-header" data-collapse-toggle="titleMatch"><h3 style="margin-bottom:4px;">Title matching</h3><span class="collapse-chevron">▾</span></button>
+    <div class="collapsible-body">
+      <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Recognise these patterns in your Outlook titles so they're counted properly instead of showing as a duplicate. Checked in order — the first match wins.</p>
+      <div id="outlookRuleList">${outlookRuleRows}</div>
+      <button class="btn btn-outline btn-small" id="addOutlookRuleBtn" style="margin-top:8px;">+ Add a pattern</button>
+    </div>
+  </div>
+  <div class="card card-pad ${sc.data?'':'is-collapsed'}" style="max-width:480px;margin-top:16px;">
+    <button class="collapsible-header" data-collapse-toggle="data"><h3 style="margin-bottom:8px;">Data</h3><span class="collapse-chevron">▾</span></button>
+    <div class="collapsible-body">
+      <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:12px;">Everything is stored securely in your own Supabase project, tied to your account.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-outline" id="exportBtn">Export backup (.json)</button>
+        <button class="btn btn-outline" id="clearEventsBtn">Clear schedule</button>
+        <button class="btn btn-danger" id="resetAllBtn">Reset all data</button>
+      </div>
     </div>
   </div>
   `;
@@ -4251,6 +4285,7 @@ function mountSettings(){
   });
   document.getElementById('clearEventsBtn').addEventListener('click', confirmClearEvents);
   document.getElementById('resetAllBtn').addEventListener('click', confirmResetAll);
+  wireCollapseToggles(state.settingsExpanded);
 }
 
 function confirmClearEvents(){
