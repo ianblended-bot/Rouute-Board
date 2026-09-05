@@ -168,7 +168,27 @@ const SEED_OUTLOOK_TYPE_RULES = [
   { pattern:'QA Visit',   eventType:'qaVisit',    sortOrder:2 },
   { pattern:'1-1',        eventType:'oneOnOne',   sortOrder:3 },
 ];
+// Patterns added after the initial release — checked for individually and
+// added if missing, regardless of whether the rules table is otherwise
+// already populated, so existing users pick them up without any of their
+// own custom rules being touched or duplicated.
+const ENSURE_OUTLOOK_TYPE_RULES = [
+  { pattern:'Site Visit',        eventType:'qaVisit' },
+  { pattern:'Site Audit',        eventType:'qaVisit' },
+  { pattern:'SA Visit',          eventType:'qaVisit' },
+  { pattern:'Triannual Review',  eventType:'oneOnOne' },
+];
 
+async function ensureOutlookRules(){
+  const existing = await DB.getAll('outlook_type_rules');
+  const existingPatterns = new Set(existing.map(r=>r.pattern.toLowerCase()));
+  let maxOrder = Math.max(0, ...existing.map(r=>r.sortOrder||0));
+  for(const rule of ENSURE_OUTLOOK_TYPE_RULES){
+    if(existingPatterns.has(rule.pattern.toLowerCase())) continue;
+    maxOrder++;
+    await DB.add('outlook_type_rules', { ...rule, sortOrder: maxOrder, createdAt: new Date().toISOString() });
+  }
+}
 async function seedIfEmpty(){
   const existing = await DB.getAll('technicians');
   if(existing.length === 0){
@@ -209,6 +229,7 @@ async function seedIfEmpty(){
       await DB.add('outlook_type_rules', { ...r, createdAt: new Date().toISOString() });
     }
   }
+  await ensureOutlookRules();
   const settings = await DB.get('settings', 'settings');
   if(!settings){
     await DB.put('settings', { ...DEFAULT_SETTINGS });

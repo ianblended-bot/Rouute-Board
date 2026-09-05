@@ -641,10 +641,10 @@ function computeOutlookConflicts(outlookEvs, rbEvs){
   }
   return conflicts;
 }
-function extractOutlookNamePart(title){
+function extractOutlookNameParts(title){
   const idx = title.lastIndexOf(' - ');
-  if(idx === -1) return '';
-  return title.slice(idx+3).trim();
+  if(idx === -1) return { after:'', before:'' };
+  return { after: title.slice(idx+3).trim(), before: title.slice(0,idx).trim() };
 }
 function matchOutlookRule(title, rules){
   const lower = title.toLowerCase();
@@ -670,31 +670,34 @@ function findTechByName(name){
 function classifyOutlookEvent(title, rules){
   const rule = matchOutlookRule(title, rules);
   if(!rule) return { matchedType:null, matchedSiteId:null, matchedTechnicianId:null, rawNamePart:'' };
-  const namePart = extractOutlookNamePart(title);
+  // Try both sides of the last " - " — some titles put the name after the
+  // keyword ("Tech Visit - Max Bee"), others put it before ("Finlay Cooper -
+  // Triannual Review") — whichever side actually resolves to a real site or
+  // technician wins.
+  const { after, before } = extractOutlookNameParts(title);
   let matchedSiteId = null, matchedTechnicianId = null;
   if(rule.eventType === 'techVisit' || rule.eventType === 'qaVisit'){
-    const site = findSiteByName(namePart);
+    const site = findSiteByName(after) || findSiteByName(before);
     if(site) matchedSiteId = site.id;
   } else if(rule.eventType === 'oneOnOne'){
-    const tech = findTechByName(namePart);
+    const tech = findTechByName(after) || findTechByName(before);
     if(tech) matchedTechnicianId = tech.id;
   }
-  return { matchedType: rule.eventType, matchedSiteId, matchedTechnicianId, rawNamePart: namePart };
+  return { matchedType: rule.eventType, matchedSiteId, matchedTechnicianId, rawNamePart: after || before };
 }
 function outlookEventTagHTML(oe, isConflict){
   const timeLabel = oe.allDay ? 'All day' : `${oe.startTime||''}${oe.endTime?`–${oe.endTime}`:''}`;
   if(oe.matchedType){
     // Recognised via a title-matching rule — render like a native tile of
     // that type so it looks and counts the same as a manually-entered visit,
-    // with just a small marker showing it came from Outlook.
+    // with just a small marker showing it came from Outlook. The original
+    // title is always shown as-is — recognition only ever changes styling
+    // and KPI counting, never the text itself.
     const t = eventTypeByKey(oe.matchedType);
-    const who = oe.matchedTechnicianId ? techName(oe.matchedTechnicianId) : null;
-    const where = oe.matchedSiteId ? siteName(oe.matchedSiteId) : null;
-    const title = who || where || oe.rawNamePart || t.label;
     return `<div class="event-tag type-${oe.matchedType} ${isConflict?'has-conflict':''}" style="position:relative;">
       <div class="et-body">
         <div class="et-type">${t.short}${isConflict?' <span class="conflict-flag" title="Conflicts with another entry">⚠</span>':''}</div>
-        <div class="et-title">${escapeHTML(title)}</div>
+        <div class="et-title">${escapeHTML(oe.title)}</div>
         <div class="et-meta">${escapeHTML(oe.allDay?'All day':(oe.startTime||''))}</div>
       </div>
       <span class="synced-ico" title="From Outlook">📅</span>
