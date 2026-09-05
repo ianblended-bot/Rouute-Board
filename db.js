@@ -268,3 +268,10 @@ async function syncOutlookCalendar({ icsUrl }){
   if(data?.error) throw new Error(data.error);
   return data; // { events: [{uid, title, date, startTime, endTime, allDay}] }
 }
+
+async function searchWebForAssistant({ query }){
+  const { data, error } = await sb.functions.invoke('assistant-web-search', { body: { query } });
+  if(error) throw error;
+  if(data?.error) throw new Error(data.error);
+  return data; // { criteriaChecked, results }
+}

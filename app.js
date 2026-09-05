@@ -72,6 +72,10 @@ const state = {
   assistantStep: 'input', // 'input' | 'analysing' | 'result'
   assistantResult: null, // { summary, actionPoints }
   assistantView: 'new', // 'new' | 'saved'
+  assistantMode: 'analyse', // 'analyse' | 'search'
+  assistantSearchQuery: '',
+  assistantSearchStep: 'input', // 'input' | 'searching' | 'result'
+  assistantSearchResults: null, // { criteriaChecked, results:[...], addedFlags:[] }
   psView: 'new', // 'new' | 'saved'
   psMode: 'quick', // 'quick' | 'quick_result' | 'guided'
   psProblemText: '',
@@ -2914,6 +2918,10 @@ function resetAssistant(){
   state.assistantStep = 'input';
   state.assistantResult = null;
   state.assistantView = 'new';
+  state.assistantMode = 'analyse';
+  state.assistantSearchQuery = '';
+  state.assistantSearchStep = 'input';
+  state.assistantSearchResults = null;
 }
 function arrayBufferToBase64(buf){
   let binary = '';
@@ -2954,17 +2962,26 @@ async function assistantHandleFiles(fileList){
   render();
 }
 function assistantDesktopHeader(){
+  const newLabel = state.assistantMode === 'search' ? '+ Search' : '+ Analyse';
   return `
   <div class="view-head" id="assistantViewHead">
     <div></div>
     <div class="view-actions" id="assistantViewActions">
       <button class="btn btn-outline" id="assistantDesktopSettings">⋯ Settings</button>
-      <button class="btn" id="assistantDesktopNew">+ Analyse</button>
+      <button class="btn" id="assistantDesktopNew">${newLabel}</button>
     </div>
+  </div>`;
+}
+function assistantModeChips(){
+  return `
+  <div class="chip-filter" style="margin-bottom:14px;">
+    <button class="chip ${state.assistantMode==='analyse'?'active':''}" data-assistant-mode="analyse">Analyse content</button>
+    <button class="chip ${state.assistantMode==='search'?'active':''}" data-assistant-mode="search">Search the web</button>
   </div>`;
 }
 function renderAssistant(){
   if(state.assistantView === 'saved') return renderAssistantSaved();
+  if(state.assistantMode === 'search') return renderAssistantSearch();
   if(state.assistantStep === 'result' && state.assistantResult) return renderAssistantResult();
   const analysing = state.assistantStep === 'analysing';
   const fileRows = state.assistantFiles.map((f,i)=>`
@@ -2976,6 +2993,7 @@ function renderAssistant(){
   return `
   ${assistantDesktopHeader()}
   <div class="card card-pad" style="max-width:560px;">
+    ${assistantModeChips()}
     <div class="field">
       <label>Paste text</label>
       <textarea id="assistantText" placeholder="Paste an email or any text here…" style="min-height:100px;" ${analysing?'disabled':''}>${escapeHTML(state.assistantText)}</textarea>
@@ -3023,9 +3041,92 @@ function renderAssistantResult(){
   </div>
   `;
 }
+function renderAssistantSearch(){
+  if(state.assistantSearchStep === 'result' && state.assistantSearchResults) return renderAssistantSearchResult();
+  const searching = state.assistantSearchStep === 'searching';
+  return `
+  ${assistantDesktopHeader()}
+  <div class="card card-pad" style="max-width:560px;">
+    ${assistantModeChips()}
+    <div class="field">
+      <label>What do you need?</label>
+      <textarea id="assistantSearchQuery" placeholder='e.g. "Find me a 5-step combination ladder, best price, EN 131 rated"' style="min-height:90px;" ${searching?'disabled':''}>${escapeHTML(state.assistantSearchQuery)}</textarea>
+      <div class="freq-hint">Claude will search the web and bring back real options — takes a bit longer than analysing pasted content.</div>
+    </div>
+    <button class="btn" id="assistantSearchBtn" style="width:100%;justify-content:center;margin-top:6px;" ${searching?'disabled':''}>${searching?'Searching…':'Search'}</button>
+  </div>
+  `;
+}
+function renderAssistantSearchResult(){
+  const r = state.assistantSearchResults;
+  const results = r.results || [];
+  const rows = results.map((res,i)=>{
+    let specBadge = '';
+    if(res.specMatch === 'yes') specBadge = `<span class="badge" style="background:#E4EFE8;color:#1F4B3F;">${escapeHTML(r.criteriaChecked||'Meets requirement')} ✓</span>`;
+    else if(res.specMatch === 'no') specBadge = `<span class="badge" style="background:#FBE0D8;color:#96331F;">${escapeHTML(r.criteriaChecked||'Requirement')} ✕</span>`;
+    else if(r.criteriaChecked) specBadge = `<span class="badge badge-neutral">${escapeHTML(r.criteriaChecked)} unconfirmed</span>`;
+    return `
+    <div class="card" style="padding:13px;margin-bottom:10px;">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:6px;">
+        <span style="font-size:13px;font-weight:700;color:var(--ink);">${escapeHTML(res.name||'Untitled option')}</span>
+        ${res.price ? `<span style="font-size:13.5px;font-weight:700;color:var(--forest-dim);flex-shrink:0;">${escapeHTML(res.price)}</span>` : ''}
+      </div>
+      ${specBadge ? `<div style="margin-bottom:7px;">${specBadge}</div>` : ''}
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.5;margin-bottom:9px;">${escapeHTML(res.description||'')}</div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        ${res.url ? `<a href="${escapeHTML(res.url)}" target="_blank" rel="noopener" style="font-size:11.5px;font-weight:600;color:#3A6EA5;">View source ›</a>` : ''}
+        <button class="icon-btn" style="margin-left:auto;" data-add-search-todo="${i}" ${r.addedFlags?.[i]?'disabled':''}>${r.addedFlags?.[i]?'✓ Added':'+ To-Do'}</button>
+      </div>
+    </div>`;
+  }).join('');
+  return `
+  ${assistantDesktopHeader()}
+  <div style="max-width:560px;">
+    ${rows || `<p style="font-size:12px;color:var(--text-faint);">No results came back — try again or rephrase.</p>`}
+    <p style="font-size:10.5px;color:var(--text-faint);text-align:center;margin:10px 0 16px;">Based on a live web search — prices and stock may have changed since.</p>
+    <button class="btn btn-outline" id="assistantSaveSearchBtn" style="width:100%;justify-content:center;margin-bottom:10px;">💾 Save this search</button>
+    <button class="btn-link" id="assistantSearchBackBtn">‹ Back to search</button>
+  </div>
+  `;
+}
+async function runAssistantWebSearch(){
+  const el = document.getElementById('assistantSearchQuery');
+  const query = (el ? el.value : state.assistantSearchQuery).trim();
+  if(!query){ toast('Describe what you need first'); return; }
+  state.assistantSearchQuery = query;
+  state.assistantSearchStep = 'searching';
+  render();
+  try{
+    const result = await searchWebForAssistant({ query });
+    const results = result.results || [];
+    state.assistantSearchResults = { criteriaChecked: result.criteriaChecked || '', results, addedFlags: results.map(()=>false) };
+    state.assistantSearchStep = 'result';
+  } catch(e){
+    toast(e?.message || 'Could not search — check your connection and try again');
+    state.assistantSearchStep = 'input';
+  }
+  render();
+}
+async function saveWebSearchResultAsTodo(res){
+  await DB.add('todos', {
+    text: `${res.name}${res.price?` — ${res.price}`:''}`, completed:false, dueDate: todayISO(), alertAt:null, alertFired:false,
+    source:'assistant-search', sourceRef: (state.assistantSearchQuery||'').slice(0,80) || null,
+    createdAt: new Date().toISOString(),
+  });
+}
 function renderAssistantSaved(){
   const items = state.cache.contentAnalyses || [];
   const rows = items.length ? items.map(a=>{
+    if(a.mode === 'search'){
+      const results = Array.isArray(a.searchResults) ? a.searchResults : [];
+      return `
+      <div class="watch-row">
+        <div><div class="watch-name">🔎 ${escapeHTML((a.searchQuery||'').slice(0,55))}${(a.searchQuery||'').length>55?'…':''}</div><div class="watch-meta">${results.length} result${results.length===1?'':'s'} · ${humanDate(toISO(new Date(a.createdAt)))}</div></div>
+        <div class="watch-spacer"></div>
+        <button class="icon-btn" data-open-analysis="${a.id}">Open</button>
+        <button class="icon-btn" data-del-analysis="${a.id}">Delete</button>
+      </div>`;
+    }
     const points = Array.isArray(a.actionPoints) ? a.actionPoints : [];
     const fileCount = (a.fileNames||[]).length;
     return `
@@ -3035,7 +3136,7 @@ function renderAssistantSaved(){
       <button class="icon-btn" data-open-analysis="${a.id}">Open</button>
       <button class="icon-btn" data-del-analysis="${a.id}">Delete</button>
     </div>`;
-  }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No saved analyses yet — save one from the result screen.</p>`;
+  }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">Nothing saved yet — save an analysis or a search from its result screen.</p>`;
   return `
   ${assistantDesktopHeader()}
   <div class="card" style="padding:4px 8px;max-width:560px;">${rows}</div>
@@ -3076,16 +3177,34 @@ async function saveActionPointAsTodo(text){
 }
 function mountAssistant(){
   document.getElementById('assistantDesktopSettings')?.addEventListener('click', ()=>openAssistantSettingsModal());
-  document.getElementById('assistantDesktopNew')?.addEventListener('click', ()=>{ resetAssistant(); render(); });
+  document.getElementById('assistantDesktopNew')?.addEventListener('click', ()=>{
+    const keepMode = state.assistantMode;
+    resetAssistant();
+    state.assistantMode = keepMode;
+    render();
+  });
+  document.querySelectorAll('[data-assistant-mode]').forEach(b=>b.addEventListener('click', ()=>{
+    state.assistantMode = b.dataset.assistantMode;
+    render();
+  }));
 
   if(state.assistantView === 'saved'){
     document.querySelectorAll('[data-open-analysis]').forEach(b=>b.addEventListener('click', ()=>{
       const a = (state.cache.contentAnalyses||[]).find(x=>x.id===Number(b.dataset.openAnalysis));
       if(!a) return;
-      state.assistantText = a.pastedText || '';
-      state.assistantInstruction = a.instruction || '';
-      state.assistantResult = { summary: a.summary, actionPoints: a.actionPoints||[], addedFlags: (a.actionPoints||[]).map(()=>false) };
-      state.assistantStep = 'result';
+      if(a.mode === 'search'){
+        state.assistantMode = 'search';
+        state.assistantSearchQuery = a.searchQuery || '';
+        const results = a.searchResults || [];
+        state.assistantSearchResults = { criteriaChecked: a.criteriaChecked || '', results, addedFlags: results.map(()=>false) };
+        state.assistantSearchStep = 'result';
+      } else {
+        state.assistantMode = 'analyse';
+        state.assistantText = a.pastedText || '';
+        state.assistantInstruction = a.instruction || '';
+        state.assistantResult = { summary: a.summary, actionPoints: a.actionPoints||[], addedFlags: (a.actionPoints||[]).map(()=>false) };
+        state.assistantStep = 'result';
+      }
       state.assistantView = 'new';
       render();
     }));
@@ -3093,6 +3212,47 @@ function mountAssistant(){
       await DB.delete('content_analyses', Number(b.dataset.delAnalysis));
       toast('Analysis deleted'); render();
     }));
+    return;
+  }
+
+  if(state.assistantMode === 'search'){
+    if(state.assistantSearchStep === 'result'){
+      document.querySelectorAll('[data-add-search-todo]').forEach(b=>b.addEventListener('click', async ()=>{
+        const idx = Number(b.dataset.addSearchTodo);
+        await saveWebSearchResultAsTodo(state.assistantSearchResults.results[idx]);
+        await refreshCache();
+        state.assistantSearchResults.addedFlags[idx] = true;
+        toast('Added to To-Do');
+        render();
+      }));
+      document.getElementById('assistantSaveSearchBtn')?.addEventListener('click', async (e)=>{
+        const btn = e.currentTarget;
+        const originalLabel = btn.textContent;
+        try{
+          await DB.add('content_analyses', {
+            mode: 'search',
+            searchQuery: state.assistantSearchQuery,
+            criteriaChecked: state.assistantSearchResults.criteriaChecked || '',
+            searchResults: state.assistantSearchResults.results,
+            pastedText: '', instruction: '', fileNames: [], summary: '', actionPoints: [],
+            createdAt: new Date().toISOString(),
+          });
+          await refreshCache();
+          toast('Search saved');
+          btn.textContent = '✓ Saved';
+          setTimeout(()=>{ if(btn.isConnected) btn.textContent = originalLabel; }, 1600);
+        } catch(err){
+          toast(`Could not save — ${err?.message || 'please try again'}`);
+        }
+      });
+      document.getElementById('assistantSearchBackBtn')?.addEventListener('click', ()=>{
+        state.assistantSearchStep = 'input';
+        render();
+      });
+    } else {
+      document.getElementById('assistantSearchQuery')?.addEventListener('input', (e)=>{ state.assistantSearchQuery = e.target.value; });
+      document.getElementById('assistantSearchBtn')?.addEventListener('click', ()=>runAssistantWebSearch());
+    }
     return;
   }
 
@@ -3179,7 +3339,7 @@ function openAssistantSettingsModal(){
     <div class="field">
       <label>View</label>
       <div class="chip-filter">
-        <button class="chip ${state.assistantView==='new'?'active':''}" data-assistant-view="new">Analyse</button>
+        <button class="chip ${state.assistantView==='new'?'active':''}" data-assistant-view="new">Current</button>
         <button class="chip ${state.assistantView==='saved'?'active':''}" data-assistant-view="saved">Saved${savedCount?` (${savedCount})`:''}</button>
         <button class="chip" id="assistantClearBtn">Clear text &amp; files</button>
       </div>
