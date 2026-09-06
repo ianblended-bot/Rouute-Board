@@ -90,6 +90,7 @@ const state = {
   settingsExpanded: {}, // { [sectionId]: true } means expanded; absent/false = collapsed (the default)
   reportsExpanded: {},
   boardMobileDate: new Date(), // which single day the mobile Weekly Board is showing
+  todoListTab: 'todo', // 'todo' | 'ongoing' | 'awaiting_reply'
   todoViewDate: new Date(),
   cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[], problemSessions:[], outlookEvents:[], outlookTypeRules:[] },
 };
@@ -100,6 +101,11 @@ const PRIORITY_META = {
   high:   { label:'High',   color:'#8A6110', bg:'#FBF0D7' },
   medium: { label:'Medium', color:'#2C5580', bg:'#E1EBF5' },
   low:    { label:'Low',    color:'#6B6B5E', bg:'#F1EEE3' },
+};
+const LIST_META = {
+  todo:           { label:'To-Do',          color:'#2F6656', sinceVerb:null },
+  ongoing:        { label:'Ongoing',        color:'#6B4A8C', sinceVerb:'Ongoing since' },
+  awaiting_reply: { label:'Awaiting Reply', color:'#B9861F', sinceVerb:'Waiting since' },
 };
 function sortTodos(a, b){
   const aDate = a.dueDate || null, bDate = b.dueDate || null;
@@ -410,6 +416,15 @@ function renderDashboard(){
   `).join('') + `<div style="padding:8px 12px 4px;"><button class="btn btn-outline btn-small" data-goto-todos="1">Open To-Do${dueTodos.length>6?` (${dueTodos.length})`:''}</button></div>`
     : `<div class="empty" style="padding:22px;"><p>Nothing due — <button class="icon-btn" data-goto-todos="1" style="display:inline;">open To-Do</button> to add a task.</p></div>`;
 
+  const dueFollowUps = state.cache.todos.filter(t=>!t.completed && (t.list==='awaiting_reply') && t.followUpDate && !t.followUpDone && t.followUpDate<=todayISO());
+  const followUpsHTML = dueFollowUps.length ? dueFollowUps.slice(0,6).map(t=>`
+    <div class="watch-row">
+      <div><div class="watch-name">${escapeHTML(t.text)}</div><div class="watch-meta">Follow up was due ${humanDateShort(t.followUpDate)}</div></div>
+      <div class="watch-spacer"></div>
+      <button class="followup-action-btn" data-followup-action="${t.id}">${t.followUpAction==='draft_email'?'✉ Draft it':'🔔 Acknowledge'}</button>
+    </div>
+  `).join('') : '';
+
   return `
   <div class="view-head">
     <div>
@@ -473,6 +488,11 @@ function renderDashboard(){
         <div class="panel-title"><h3>To-Do</h3></div>
         <div class="panel-body">${todoRowsHTML}</div>
       </div>
+      ${dueFollowUps.length ? `
+      <div class="card" style="margin-bottom:16px;">
+        <div class="panel-title"><h3>Follow-ups due</h3></div>
+        <div class="panel-body">${followUpsHTML}</div>
+      </div>` : ''}
       <div class="card" style="margin-bottom:16px;">
         <div class="panel-title"><h3>Outstanding — needs confirming</h3></div>
         <div class="panel-body">${outstandingHTML}</div>
@@ -499,6 +519,7 @@ function mountDashboard(){
   document.getElementById('openWeeklyBoardBtn')?.addEventListener('click', ()=>navigate('schedule'));
   document.getElementById('dashAddEvent')?.addEventListener('click', ()=>openEventForm({ date: todayISO() }));
   document.getElementById('dashGenerate')?.addEventListener('click', ()=>openGenerateModal());
+  wireFollowUpActions();
   document.querySelectorAll('[data-open-tech]').forEach(el=>el.addEventListener('click', ()=>openTechnicianForm(Number(el.dataset.openTech))));
   document.querySelectorAll('[data-open-site]').forEach(el=>el.addEventListener('click', ()=>openSiteForm(Number(el.dataset.openSite))));
   document.querySelectorAll('[data-open-event]').forEach(el=>el.addEventListener('click', ()=>openEventForm(null, Number(el.dataset.openEvent))));
@@ -2302,7 +2323,7 @@ function mountReports(){
 /* ================= TO-DO LIST ================= */
 function getFilteredTodos(filter){
   const f = filter || state.todoFilter;
-  let list = state.cache.todos;
+  let list = state.cache.todos.filter(t => (t.list || 'todo') === (state.todoListTab || 'todo'));
   if(f==='open') list = list.filter(t=>!t.completed);
   else if(f==='completed') list = list.filter(t=>t.completed);
   return list; // already sorted newest-first in refreshCache
@@ -2333,7 +2354,59 @@ function todoSourceBadge(t){
   if(!t.source || t.source==='manual') return '';
   return `<span class="badge badge-scheduled">${escapeHTML(t.source)}</span>`;
 }
+function todoListTabsHTML(){
+  const tab = state.todoListTab || 'todo';
+  return `
+  <div class="chip-filter" style="margin-bottom:14px;">
+    ${Object.keys(LIST_META).map(k=>`<button class="chip ${tab===k?'active':''}" data-todo-tab="${k}">${LIST_META[k].label}</button>`).join('')}
+  </div>`;
+}
+function todoFollowUpStrip(t){
+  if(!t.followUpDate) return `<div class="followup-strip"><span style="color:var(--text-faint);">No follow-up set</span></div>`;
+  if(t.followUpDone) return `<div class="followup-strip"><span class="followup-icon">✓</span><span style="color:var(--text-faint);">Followed up · was due ${humanDateShort(t.followUpDate)}</span></div>`;
+  const isDueOrPast = t.followUpDate <= todayISO();
+  const actionLabel = t.followUpAction === 'draft_email' ? '✉ Draft it' : '🔔 Acknowledge';
+  return `<div class="followup-strip">
+    <span class="followup-icon">⏰</span>
+    <span class="${isDueOrPast?'followup-due':''}">${isDueOrPast?'Follow up was due':'Follow up on'} ${humanDateShort(t.followUpDate)}</span>
+    ${isDueOrPast ? `<button class="followup-action-btn" data-followup-action="${t.id}">${actionLabel}</button>` : ''}
+  </div>`;
+}
+function renderTodosSmartList(tab){
+  const meta = LIST_META[tab];
+  const list = getFilteredTodos();
+  const rows = list.map(t=>{
+    const sinceISO = t.listChangedAt ? toISO(new Date(t.listChangedAt)) : (t.createdAt ? toISO(new Date(t.createdAt)) : null);
+    return `
+    <div class="todo-row-min ${t.completed?'is-done':''}" style="border-left:3px solid ${meta.color};flex-direction:column;align-items:stretch;gap:0;">
+      <div style="display:flex;align-items:flex-start;gap:12px;">
+        <button class="et-check ${t.completed?'is-done':''}" data-toggle-todo="${t.id}" title="${t.completed?'Mark not done':'Mark done'}" style="margin-top:2px;">✓</button>
+        <div class="todo-body">
+          <div class="todo-text">${escapeHTML(t.text)}</div>
+          <div class="todo-meta">${meta.sinceVerb} ${sinceISO ? humanDateShort(sinceISO) : ''}</div>
+        </div>
+        <button class="todo-kebab" data-todo-menu="${t.id}" aria-label="Task options">⋯</button>
+      </div>
+      ${tab==='awaiting_reply' ? todoFollowUpStrip(t) : ''}
+    </div>`;
+  }).join('');
+  const emptyMsg = tab==='ongoing' ? 'Nothing ongoing right now — move a task here, or add a new one.' : 'Nothing awaiting a reply right now.';
+  return `
+  <div class="view-head" id="todoViewHead">
+    <div></div>
+    <div class="view-actions" id="todoViewActions">
+      <button class="btn btn-outline" id="todoDesktopSettings">⋯ Settings</button>
+      <button class="btn" id="todoDesktopAdd">+ Add task</button>
+    </div>
+  </div>
+  ${todoListTabsHTML()}
+  ${list.length ? `<div class="card" style="padding:4px 8px;">${rows}</div>` : `<div class="card empty"><h3>Nothing here</h3><p>${emptyMsg}</p></div>`}
+  `;
+}
 function renderTodos(){
+  const tab = state.todoListTab || 'todo';
+  if(tab !== 'todo') return renderTodosSmartList(tab);
+
   const mode = state.todoViewMode || 'day';
   const allTodos = state.cache.todos;
 
@@ -2383,6 +2456,7 @@ function renderTodos(){
       <button class="btn" id="todoDesktopAdd">+ Add task</button>
     </div>
   </div>
+  ${todoListTabsHTML()}
   ${dayNav}
   ${list.length ? `<div class="card" style="padding:4px 8px;">${rows}</div>` : `<div class="card empty"><h3>Nothing here</h3><p>${emptyMsg}</p></div>`}
   ${dayRollover}
@@ -2391,14 +2465,24 @@ function renderTodos(){
 function openTodoRowMenu(id){
   const t = state.cache.todos.find(x=>x.id===id);
   if(!t) return;
+  const currentList = t.list || 'todo';
   const body = `<p style="font-size:14px;font-weight:600;color:var(--ink);margin-bottom:2px;">${escapeHTML(t.text)}</p>`;
+  const moveButtons = Object.keys(LIST_META).filter(k=>k!==currentList).map(k=>
+    `<button class="btn btn-outline" data-move-list="${k}" style="width:100%;justify-content:center;">Move to ${LIST_META[k].label}</button>`
+  ).join('');
   const foot = `
     <div class="modal-foot-right" style="width:100%;flex-direction:column;gap:8px;">
+      ${moveButtons}
       ${!t.completed ? `<button class="btn btn-outline" id="rmMove" style="width:100%;justify-content:center;">Move to a date…</button>` : ''}
       <button class="btn btn-outline" id="rmEdit" style="width:100%;justify-content:center;">Edit</button>
       <button class="btn btn-danger" id="rmDelete" style="width:100%;justify-content:center;">Delete</button>
     </div>`;
   showModal('Task options', body, foot);
+  document.querySelectorAll('[data-move-list]').forEach(b=>b.addEventListener('click', async ()=>{
+    const newList = b.dataset.moveList;
+    await DB.put('todos', { ...t, list: newList, listChangedAt: new Date().toISOString() });
+    closeModal(); toast(`Moved to ${LIST_META[newList].label}`); render();
+  }));
   document.getElementById('rmMove')?.addEventListener('click', ()=>openRolloverModal([id]));
   document.getElementById('rmEdit').addEventListener('click', ()=>openTodoForm(id));
   document.getElementById('rmDelete').addEventListener('click', async ()=>{
@@ -2442,6 +2526,30 @@ function openTodoSettingsModal(){
   });
   document.getElementById('todoExportBtn').addEventListener('click', ()=>{ closeModal(); openTodoExportModal(); });
 }
+function wireFollowUpActions(){
+  document.querySelectorAll('[data-followup-action]').forEach(b=>b.addEventListener('click', async (e)=>{
+    e.stopPropagation();
+    const t = state.cache.todos.find(x=>x.id===Number(b.dataset.followupAction));
+    if(!t) return;
+    if(t.followUpAction === 'draft_email'){
+      const sinceLabel = t.listChangedAt ? humanDateShort(toISO(new Date(t.listChangedAt))) : '';
+      state.composeNotes = `Following up on: ${t.text}. I first reached out on ${sinceLabel} and haven't heard back yet — a polite nudge to check in.`;
+      state.composeDraft = null;
+      state.composeReplyContext = '';
+      state.composeReplyPreview = '';
+      state.composeStep = 'input';
+      state.composeView = 'new';
+      await DB.put('todos', { ...t, followUpDone: true });
+      await refreshCache();
+      navigate('compose');
+    } else {
+      await DB.put('todos', { ...t, followUpDone: true });
+      await refreshCache();
+      toast('Follow-up acknowledged');
+      render();
+    }
+  }));
+}
 function mountTodos(){
   document.getElementById('todoDayPrev')?.addEventListener('click', ()=>{ state.todoViewDate = addDays(state.todoViewDate||new Date(), -1); render(); });
   document.getElementById('todoDayNext')?.addEventListener('click', ()=>{ state.todoViewDate = addDays(state.todoViewDate||new Date(), 1); render(); });
@@ -2462,19 +2570,29 @@ function mountTodos(){
     render();
   }));
   document.querySelectorAll('[data-todo-menu]').forEach(b=>b.addEventListener('click', ()=>openTodoRowMenu(Number(b.dataset.todoMenu))));
+  document.querySelectorAll('[data-todo-tab]').forEach(b=>b.addEventListener('click', ()=>{ state.todoListTab = b.dataset.todoTab; render(); }));
+  wireFollowUpActions();
   document.getElementById('todoDesktopAdd')?.addEventListener('click', ()=>openTodoForm());
   document.getElementById('todoDesktopSettings')?.addEventListener('click', ()=>openTodoSettingsModal());
 }
 function openTodoForm(editId){
   const existing = editId ? state.cache.todos.find(t=>t.id===editId) : null;
-  const v = existing || { text:'', dueDate: todayISO(), alertAt:null, completed:false, priority:'medium' };
+  const v = existing || { text:'', dueDate: todayISO(), alertAt:null, completed:false, priority:'medium', list:'todo', followUpDate:null, followUpAction:'alert' };
   const alertLocal = v.alertAt ? new Date(v.alertAt) : null;
   const alertDateVal = alertLocal ? toISO(alertLocal) : '';
   const alertTimeVal = alertLocal ? `${String(alertLocal.getHours()).padStart(2,'0')}:${String(alertLocal.getMinutes()).padStart(2,'0')}` : '';
 
   const priority = v.priority && PRIORITY_META[v.priority] ? v.priority : 'medium';
+  const list = v.list && LIST_META[v.list] ? v.list : 'todo';
+  const followUpAction = v.followUpAction === 'draft_email' ? 'draft_email' : 'alert';
   const body = `
     <div class="field"><label>Task</label><textarea id="tdText" placeholder="What needs doing?">${escapeHTML(v.text)}</textarea></div>
+    <div class="field">
+      <label>List</label>
+      <div class="chip-filter">
+        ${Object.keys(LIST_META).map(k=>`<button class="chip ${list===k?'active':''}" data-td-list="${k}" style="${list===k?`background:${LIST_META[k].color};border-color:${LIST_META[k].color};`:''}">${LIST_META[k].label}</button>`).join('')}
+      </div>
+    </div>
     <div class="field">
       <label>Priority</label>
       <div class="chip-filter">
@@ -2487,6 +2605,15 @@ function openTodoForm(editId){
       <div class="field"><label>Alert time</label><input type="time" id="tdAlertTime" value="${alertTimeVal}"></div>
     </div>
     <div class="freq-hint">Alerts highlight the task here, and fire a browser notification if you've enabled them — but only while Route Board is open in a tab.</div>
+    <div class="field" id="tdFollowUpField" style="${list==='awaiting_reply'?'':'display:none;'}background:var(--paper-dim);border-radius:9px;padding:12px;">
+      <label>Follow up</label>
+      <input type="date" id="tdFollowUpDate" value="${v.followUpDate||''}">
+      <div class="chip-filter" style="margin-top:8px;">
+        <button class="chip ${followUpAction==='alert'?'active':''}" data-td-followup-action="alert">🔔 Just alert me</button>
+        <button class="chip ${followUpAction==='draft_email'?'active':''}" data-td-followup-action="draft_email">✉ Draft a follow-up email</button>
+      </div>
+      <div class="freq-hint">On this date, Route Board will prompt you next time you're in the app — it can't act on its own while you're away, but it'll be ready the moment you open it.</div>
+    </div>
     ${existing ? `<div class="field"><label><input type="checkbox" id="tdCompleted" ${v.completed?'checked':''} style="width:auto;"> Completed</label></div>` : ''}
   `;
   const foot = `
@@ -2495,6 +2622,8 @@ function openTodoForm(editId){
   `;
   showModal(existing?'Edit task':'New task', body, foot);
   let selectedPriority = priority;
+  let selectedList = list;
+  let selectedFollowUpAction = followUpAction;
   document.querySelectorAll('[data-td-priority]').forEach(chip=>chip.addEventListener('click', ()=>{
     selectedPriority = chip.dataset.tdPriority;
     document.querySelectorAll('[data-td-priority]').forEach(c=>{
@@ -2504,6 +2633,21 @@ function openTodoForm(editId){
       c.style.background = isActive ? m.color : '';
       c.style.borderColor = isActive ? m.color : '';
     });
+  }));
+  document.querySelectorAll('[data-td-list]').forEach(chip=>chip.addEventListener('click', ()=>{
+    selectedList = chip.dataset.tdList;
+    document.querySelectorAll('[data-td-list]').forEach(c=>{
+      const isActive = c.dataset.tdList === selectedList;
+      c.classList.toggle('active', isActive);
+      const m = LIST_META[c.dataset.tdList];
+      c.style.background = isActive ? m.color : '';
+      c.style.borderColor = isActive ? m.color : '';
+    });
+    document.getElementById('tdFollowUpField').style.display = selectedList==='awaiting_reply' ? '' : 'none';
+  }));
+  document.querySelectorAll('[data-td-followup-action]').forEach(chip=>chip.addEventListener('click', ()=>{
+    selectedFollowUpAction = chip.dataset.tdFollowupAction;
+    document.querySelectorAll('[data-td-followup-action]').forEach(c=>c.classList.toggle('active', c.dataset.tdFollowupAction===selectedFollowUpAction));
   }));
   document.getElementById('tdCancel').addEventListener('click', closeModal);
   document.getElementById('tdDelete')?.addEventListener('click', async ()=>{
@@ -2517,10 +2661,18 @@ function openTodoForm(editId){
     const alertDate = document.getElementById('tdAlertDate').value;
     const alertTime = document.getElementById('tdAlertTime').value || '09:00';
     const alertAt = alertDate ? new Date(`${alertDate}T${alertTime}:00`).toISOString() : null;
+    const followUpDate = selectedList==='awaiting_reply' ? (document.getElementById('tdFollowUpDate').value || null) : null;
+    const listChanged = !existing || existing.list !== selectedList;
+    const followUpDateChanged = !existing || existing.followUpDate !== followUpDate;
     const obj = {
       text,
       dueDate,
       priority: selectedPriority,
+      list: selectedList,
+      listChangedAt: listChanged ? new Date().toISOString() : (existing.listChangedAt || existing.createdAt),
+      followUpDate,
+      followUpAction: selectedFollowUpAction,
+      followUpDone: followUpDateChanged ? false : (existing?.followUpDone || false), // a new/changed follow-up date needs acting on again
       alertAt,
       alertFired: (existing && existing.alertAt===alertAt) ? existing.alertFired : false, // reset if the alert time changed
       completed: existing ? document.getElementById('tdCompleted').checked : false,
@@ -2562,9 +2714,11 @@ async function bulkRolloverTodos(newDate, ids){
 function buildTodoExportRows(){
   return getFilteredTodos().map(t=>({
     Task: t.text,
+    List: LIST_META[t.list] ? LIST_META[t.list].label : 'To-Do',
     Priority: PRIORITY_META[t.priority] ? PRIORITY_META[t.priority].label : 'Medium',
     Due: t.dueDate || '',
     Alert: t.alertAt ? new Date(t.alertAt).toLocaleString('en-GB') : '',
+    'Follow-up': t.followUpDate || '',
     Completed: t.completed ? 'Yes' : 'No',
     Created: new Date(t.createdAt).toLocaleString('en-GB'),
   }));
@@ -2584,8 +2738,8 @@ function openTodoExportModal(){
     else await exportPDF(rows, filename, null, null, {
       title: 'Route Board — To-Do List',
       subtitle: `Exported ${humanDate(todayISO())}`,
-      headers: ['Task','Priority','Due','Alert','Completed','Created'],
-      bodyRows: rows.map(r=>[r.Task, r.Priority, r.Due, r.Alert, r.Completed, r.Created]),
+      headers: ['Task','List','Priority','Due','Alert','Follow-up','Completed','Created'],
+      bodyRows: rows.map(r=>[r.Task, r.List, r.Priority, r.Due, r.Alert, r['Follow-up'], r.Completed, r.Created]),
       orientation: 'portrait',
     });
     closeModal();

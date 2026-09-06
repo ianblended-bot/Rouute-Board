@@ -398,6 +398,10 @@ tbody tr:hover{ background:var(--paper-dim); }
 
 /* minimal row style: checkbox, title(+optional badges), single kebab menu */
 .todo-row-min{ display:flex; align-items:center; gap:12px; padding:13px 12px; border-radius:8px; }
+.followup-strip{ display:flex; align-items:center; gap:7px; margin-top:9px; margin-left:30px; padding-top:9px; border-top:1px dashed var(--line-soft); font-size:11px; color:var(--text-dim); }
+.followup-icon{ font-size:11px; }
+.followup-due{ color:#96331F; font-weight:700; }
+.followup-action-btn{ margin-left:auto; font-size:10.5px; font-weight:700; color:#fff; background:var(--forest-dim); border:none; padding:4px 11px; border-radius:20px; }
 .todo-row-min:hover{ background:var(--paper-dim); }
 .todo-row-min + .todo-row-min{ border-top:1px solid var(--line-soft); }
 .todo-row-min.is-done .todo-text{ text-decoration:line-through; color:var(--text-faint); font-weight:500; }
