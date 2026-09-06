@@ -2354,6 +2354,56 @@ function todoSourceBadge(t){
   if(!t.source || t.source==='manual') return '';
   return `<span class="badge badge-scheduled">${escapeHTML(t.source)}</span>`;
 }
+function formatFileSize(bytes){
+  if(!bytes) return '';
+  if(bytes < 1024*1024) return `${Math.round(bytes/1024)} KB`;
+  return `${(bytes/(1024*1024)).toFixed(1)} MB`;
+}
+function fileTypeIcon(type){
+  if(type?.startsWith('image/')) return '🖼️';
+  if(type === 'application/pdf') return '📄';
+  if(type?.includes('word')) return '📝';
+  if(type?.includes('sheet') || type?.includes('excel')) return '📊';
+  return '📎';
+}
+function todoAttachmentChipsHTML(attachments){
+  if(!attachments || !attachments.length) return '';
+  return attachments.map((f,i)=>`
+    <div class="file-chip">
+      <span>${fileTypeIcon(f.type)}</span>
+      <span class="name">${escapeHTML(f.name)}</span>
+      <span class="size">${formatFileSize(f.size)}</span>
+      <button class="remove" data-remove-attachment="${i}">✕</button>
+    </div>`).join('');
+}
+function todoAttachmentPill(t){
+  const count = (t.attachments || []).length;
+  if(!count) return '';
+  return `<button class="attach-pill" data-view-attachments="${t.id}">📎 ${count}</button>`;
+}
+function openTaskAttachmentsModal(id){
+  const t = state.cache.todos.find(x=>x.id===id);
+  if(!t || !(t.attachments||[]).length) return;
+  const rows = t.attachments.map((f,i)=>`
+    <div class="watch-row">
+      <div><div class="watch-name">${fileTypeIcon(f.type)} ${escapeHTML(f.name)}</div><div class="watch-meta">${formatFileSize(f.size)}</div></div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-download-attachment="${i}">Download</button>
+    </div>`).join('');
+  showModal('Attachments', `<div class="card" style="padding:2px 8px;box-shadow:none;border:1px solid var(--line-soft);">${rows}</div>`, `<span></span><div class="modal-foot-right"><button class="btn" id="attachModalClose">Close</button></div>`);
+  document.getElementById('attachModalClose').addEventListener('click', closeModal);
+  document.querySelectorAll('[data-download-attachment]').forEach(b=>b.addEventListener('click', async ()=>{
+    const f = t.attachments[Number(b.dataset.downloadAttachment)];
+    try{
+      const url = await getTaskAttachmentUrl(f.path);
+      const a = document.createElement('a');
+      a.href = url; a.download = f.name; a.target = '_blank';
+      document.body.appendChild(a); a.click(); a.remove();
+    } catch(e){
+      toast('Could not download this file — it may have been removed');
+    }
+  }));
+}
 function todoListTabsHTML(){
   const tab = state.todoListTab || 'todo';
   return `
@@ -2383,7 +2433,7 @@ function renderTodosSmartList(tab){
         <button class="et-check ${t.completed?'is-done':''}" data-toggle-todo="${t.id}" title="${t.completed?'Mark not done':'Mark done'}" style="margin-top:2px;">✓</button>
         <div class="todo-body">
           <div class="todo-text">${escapeHTML(t.text)}</div>
-          <div class="todo-meta">${meta.sinceVerb} ${sinceISO ? humanDateShort(sinceISO) : ''}</div>
+          <div class="todo-meta">${meta.sinceVerb} ${sinceISO ? humanDateShort(sinceISO) : ''}${todoAttachmentPill(t)}</div>
         </div>
         <button class="todo-kebab" data-todo-menu="${t.id}" aria-label="Task options">⋯</button>
       </div>
@@ -2437,7 +2487,7 @@ function renderTodos(){
       <button class="et-check ${t.completed?'is-done':''}" data-toggle-todo="${t.id}" title="${t.completed?'Mark not done':'Mark done'}">✓</button>
       <div class="todo-body">
         <div class="todo-text">${escapeHTML(t.text)}</div>
-        <div class="todo-meta">${todoPriorityBadge(t)}${mode!=='day' ? `${todoDueBadge(t)}${todoAlertBadge(t)}${todoSourceBadge(t)}` : (todoAlertBadge(t) || '')}</div>
+        <div class="todo-meta">${todoPriorityBadge(t)}${mode!=='day' ? `${todoDueBadge(t)}${todoAlertBadge(t)}${todoSourceBadge(t)}` : (todoAlertBadge(t) || '')}${todoAttachmentPill(t)}</div>
       </div>
       <button class="todo-kebab" data-todo-menu="${t.id}" aria-label="Task options">⋯</button>
     </div>
@@ -2571,6 +2621,10 @@ function mountTodos(){
   }));
   document.querySelectorAll('[data-todo-menu]').forEach(b=>b.addEventListener('click', ()=>openTodoRowMenu(Number(b.dataset.todoMenu))));
   document.querySelectorAll('[data-todo-tab]').forEach(b=>b.addEventListener('click', ()=>{ state.todoListTab = b.dataset.todoTab; render(); }));
+  document.querySelectorAll('[data-view-attachments]').forEach(b=>b.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    openTaskAttachmentsModal(Number(b.dataset.viewAttachments));
+  }));
   wireFollowUpActions();
   document.getElementById('todoDesktopAdd')?.addEventListener('click', ()=>openTodoForm());
   document.getElementById('todoDesktopSettings')?.addEventListener('click', ()=>openTodoSettingsModal());
@@ -2614,6 +2668,13 @@ function openTodoForm(editId){
       </div>
       <div class="freq-hint">On this date, Route Board will prompt you next time you're in the app — it can't act on its own while you're away, but it'll be ready the moment you open it.</div>
     </div>
+    <div class="field">
+      <label>Attachments</label>
+      <div id="tdAttachmentsList">${todoAttachmentChipsHTML(v.attachments || [])}</div>
+      <input type="file" id="tdAttachInput" multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx" style="display:none;">
+      <button type="button" class="btn btn-outline" id="tdAttachBtn" style="width:100%;justify-content:center;border-style:dashed;">+ Attach a file</button>
+      <div class="freq-hint">Photos, PDFs and common documents — up to 10MB each, ${MAX_ATTACHMENTS_PER_TASK} per task.</div>
+    </div>
     ${existing ? `<div class="field"><label><input type="checkbox" id="tdCompleted" ${v.completed?'checked':''} style="width:auto;"> Completed</label></div>` : ''}
   `;
   const foot = `
@@ -2649,6 +2710,36 @@ function openTodoForm(editId){
     selectedFollowUpAction = chip.dataset.tdFollowupAction;
     document.querySelectorAll('[data-td-followup-action]').forEach(c=>c.classList.toggle('active', c.dataset.tdFollowupAction===selectedFollowUpAction));
   }));
+  let taskAttachments = [...(v.attachments || [])];
+  function refreshAttachmentChips(){
+    document.getElementById('tdAttachmentsList').innerHTML = todoAttachmentChipsHTML(taskAttachments);
+    document.querySelectorAll('[data-remove-attachment]').forEach(b=>b.addEventListener('click', async ()=>{
+      const idx = Number(b.dataset.removeAttachment);
+      const removed = taskAttachments[idx];
+      taskAttachments.splice(idx, 1);
+      refreshAttachmentChips();
+      try{ if(removed?.path) await deleteTaskAttachment(removed.path); } catch(e){ /* file may already be gone, non-fatal */ }
+    }));
+  }
+  refreshAttachmentChips();
+  document.getElementById('tdAttachBtn').addEventListener('click', ()=>document.getElementById('tdAttachInput').click());
+  document.getElementById('tdAttachInput').addEventListener('change', async (e)=>{
+    const files = Array.from(e.target.files);
+    e.target.value = '';
+    for(const file of files){
+      if(taskAttachments.length >= MAX_ATTACHMENTS_PER_TASK){
+        toast(`Only ${MAX_ATTACHMENTS_PER_TASK} attachments allowed per task`);
+        break;
+      }
+      try{
+        const meta = await uploadTaskAttachment(file);
+        taskAttachments.push(meta);
+        refreshAttachmentChips();
+      } catch(err){
+        toast(err?.message || `Could not attach "${file.name}"`);
+      }
+    }
+  });
   document.getElementById('tdCancel').addEventListener('click', closeModal);
   document.getElementById('tdDelete')?.addEventListener('click', async ()=>{
     await DB.delete('todos', editId);
@@ -2673,6 +2764,7 @@ function openTodoForm(editId){
       followUpDate,
       followUpAction: selectedFollowUpAction,
       followUpDone: followUpDateChanged ? false : (existing?.followUpDone || false), // a new/changed follow-up date needs acting on again
+      attachments: taskAttachments,
       alertAt,
       alertFired: (existing && existing.alertAt===alertAt) ? existing.alertFired : false, // reset if the alert time changed
       completed: existing ? document.getElementById('tdCompleted').checked : false,
@@ -2719,6 +2811,7 @@ function buildTodoExportRows(){
     Due: t.dueDate || '',
     Alert: t.alertAt ? new Date(t.alertAt).toLocaleString('en-GB') : '',
     'Follow-up': t.followUpDate || '',
+    Attachments: (t.attachments||[]).map(f=>f.name).join('; '),
     Completed: t.completed ? 'Yes' : 'No',
     Created: new Date(t.createdAt).toLocaleString('en-GB'),
   }));

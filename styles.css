@@ -367,6 +367,8 @@ tbody tr:hover{ background:var(--paper-dim); }
 .file-chip .name{ flex:1; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .file-chip .remove{ background:none; border:none; color:var(--text-faint); font-size:13px; padding:2px 4px; flex-shrink:0; }
 .file-chip .remove:hover{ color:var(--clay); }
+.file-chip .size{ color:var(--text-faint); font-size:11px; flex-shrink:0; }
+.attach-pill{ display:inline-flex; align-items:center; gap:3px; font-size:10.5px; font-weight:600; color:var(--text-dim); background:var(--paper-dim); border:1px solid var(--line-soft); padding:2px 8px; border-radius:20px; }
 
 /* ================= problem solver ================= */
 .ps-progress-row{ display:flex; gap:5px; margin-bottom:6px; }

@@ -276,3 +276,36 @@ async function searchWebForAssistant({ query }){
   if(data?.error) throw new Error(data.error);
   return data; // { criteriaChecked, results }
 }
+
+const ALLOWED_ATTACHMENT_TYPES = [
+  'image/jpeg','image/png','image/gif','image/webp',
+  'application/pdf',
+  'application/msword','application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+];
+const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024; // 10MB
+const MAX_ATTACHMENTS_PER_TASK = 3;
+
+async function uploadTaskAttachment(file){
+  if(!ALLOWED_ATTACHMENT_TYPES.includes(file.type)){
+    throw new Error(`"${file.name}" isn't a supported file type — photos, PDFs and common documents only`);
+  }
+  if(file.size > MAX_ATTACHMENT_SIZE){
+    throw new Error(`"${file.name}" is over the 10MB limit`);
+  }
+  const session = (await sb.auth.getSession()).data.session;
+  const userId = session?.user?.id || 'unknown';
+  const path = `${userId}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
+  const { error } = await sb.storage.from('task-attachments').upload(path, file);
+  if(error) throw error;
+  return { name: file.name, path, size: file.size, type: file.type };
+}
+async function getTaskAttachmentUrl(path){
+  const { data, error } = await sb.storage.from('task-attachments').createSignedUrl(path, 120);
+  if(error) throw error;
+  return data.signedUrl;
+}
+async function deleteTaskAttachment(path){
+  const { error } = await sb.storage.from('task-attachments').remove([path]);
+  if(error) throw error;
+}
