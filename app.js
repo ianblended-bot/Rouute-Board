@@ -2359,7 +2359,9 @@ function formatFileSize(bytes){
   if(bytes < 1024*1024) return `${Math.round(bytes/1024)} KB`;
   return `${(bytes/(1024*1024)).toFixed(1)} MB`;
 }
-function fileTypeIcon(type){
+function fileTypeIcon(type, name){
+  const ext = name ? '.' + (name.split('.').pop()||'').toLowerCase() : '';
+  if(type === 'message/rfc822' || ext === '.eml') return '✉️';
   if(type?.startsWith('image/')) return '🖼️';
   if(type === 'application/pdf') return '📄';
   if(type?.includes('word')) return '📝';
@@ -2370,7 +2372,7 @@ function todoAttachmentChipsHTML(attachments){
   if(!attachments || !attachments.length) return '';
   return attachments.map((f,i)=>`
     <div class="file-chip">
-      <span>${fileTypeIcon(f.type)}</span>
+      <span>${fileTypeIcon(f.type, f.name)}</span>
       <span class="name">${escapeHTML(f.name)}</span>
       <span class="size">${formatFileSize(f.size)}</span>
       <button class="remove" data-remove-attachment="${i}">✕</button>
@@ -2386,7 +2388,7 @@ function openTaskAttachmentsModal(id){
   if(!t || !(t.attachments||[]).length) return;
   const rows = t.attachments.map((f,i)=>`
     <div class="watch-row">
-      <div><div class="watch-name">${fileTypeIcon(f.type)} ${escapeHTML(f.name)}</div><div class="watch-meta">${formatFileSize(f.size)}</div></div>
+      <div><div class="watch-name">${fileTypeIcon(f.type, f.name)} ${escapeHTML(f.name)}</div><div class="watch-meta">${formatFileSize(f.size)}</div></div>
       <div class="watch-spacer"></div>
       <button class="icon-btn" data-download-attachment="${i}">Download</button>
     </div>`).join('');
@@ -2671,9 +2673,9 @@ function openTodoForm(editId){
     <div class="field">
       <label>Attachments</label>
       <div id="tdAttachmentsList">${todoAttachmentChipsHTML(v.attachments || [])}</div>
-      <input type="file" id="tdAttachInput" multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx" style="display:none;">
+      <input type="file" id="tdAttachInput" multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.eml" style="display:none;">
       <button type="button" class="btn btn-outline" id="tdAttachBtn" style="width:100%;justify-content:center;border-style:dashed;">+ Attach a file</button>
-      <div class="freq-hint">Photos, PDFs and common documents — up to 10MB each, ${MAX_ATTACHMENTS_PER_TASK} per task.</div>
+      <div class="freq-hint">Photos, PDFs, common documents and saved emails (.eml) — up to 10MB each, ${MAX_ATTACHMENTS_PER_TASK} per task.</div>
     </div>
     ${existing ? `<div class="field"><label><input type="checkbox" id="tdCompleted" ${v.completed?'checked':''} style="width:auto;"> Completed</label></div>` : ''}
   `;

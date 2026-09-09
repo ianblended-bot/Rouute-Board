@@ -282,13 +282,22 @@ const ALLOWED_ATTACHMENT_TYPES = [
   'application/pdf',
   'application/msword','application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.ms-excel','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'message/rfc822', // .eml — the MIME type browsers *should* report
 ];
+// Browsers are inconsistent about reporting a MIME type for some formats
+// (.eml especially, since it's not as universally registered as PDF/JPG) —
+// a file is accepted if it matches either list, so an unrecognised or empty
+// file.type doesn't wrongly block a valid file.
+const ALLOWED_ATTACHMENT_EXTENSIONS = ['.jpg','.jpeg','.png','.gif','.webp','.pdf','.doc','.docx','.xls','.xlsx','.eml'];
 const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_ATTACHMENTS_PER_TASK = 3;
 
 async function uploadTaskAttachment(file){
-  if(!ALLOWED_ATTACHMENT_TYPES.includes(file.type)){
-    throw new Error(`"${file.name}" isn't a supported file type — photos, PDFs and common documents only`);
+  const ext = '.' + (file.name.split('.').pop() || '').toLowerCase();
+  const typeOk = ALLOWED_ATTACHMENT_TYPES.includes(file.type);
+  const extOk = ALLOWED_ATTACHMENT_EXTENSIONS.includes(ext);
+  if(!typeOk && !extOk){
+    throw new Error(`"${file.name}" isn't a supported file type — photos, PDFs, common documents and .eml emails only`);
   }
   if(file.size > MAX_ATTACHMENT_SIZE){
     throw new Error(`"${file.name}" is over the 10MB limit`);
