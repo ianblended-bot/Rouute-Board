@@ -91,8 +91,9 @@ const state = {
   reportsExpanded: {},
   boardMobileDate: new Date(), // which single day the mobile Weekly Board is showing
   todoListTab: 'todo', // 'todo' | 'ongoing' | 'awaiting_reply'
+  uniformSelectedTechId: null, // null = tracker shows the technician list
   todoViewDate: new Date(),
-  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[], problemSessions:[], outlookEvents:[], outlookTypeRules:[] },
+  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[], problemSessions:[], outlookEvents:[], outlookTypeRules:[], uniformCatalog:[], uniformIssues:[] },
 };
 
 const PRIORITY_RANK = { urgent:0, high:1, medium:2, low:3 };
@@ -118,8 +119,8 @@ function sortTodos(a, b){
   return new Date(b.createdAt) - new Date(a.createdAt); // final tiebreaker: newest first
 }
 async function refreshCache(){
-  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules] = await Promise.all([
-    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples'), DB.getAll('email_drafts'), DB.getAll('content_analyses'), DB.getAll('problem_sessions'), DB.getAll('outlook_events'), DB.getAll('outlook_type_rules')
+  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules, uniformCatalog, uniformIssues] = await Promise.all([
+    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples'), DB.getAll('email_drafts'), DB.getAll('content_analyses'), DB.getAll('problem_sessions'), DB.getAll('outlook_events'), DB.getAll('outlook_type_rules'), DB.getAll('uniform_catalog'), DB.getAll('uniform_issues')
   ]);
   technicians.sort((a,b)=>a.name.localeCompare(b.name));
   sites.sort((a,b)=>a.name.localeCompare(b.name));
@@ -134,7 +135,9 @@ async function refreshCache(){
   problemSessions.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)); // newest first
   outlookEvents.sort((a,b)=> a.date.localeCompare(b.date) || (a.startTime||'').localeCompare(b.startTime||''));
   outlookTypeRules.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
-  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules };
+  uniformCatalog.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
+  uniformIssues.sort((a,b)=> b.issueDate.localeCompare(a.issueDate)); // newest first
+  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules, uniformCatalog, uniformIssues };
 }
 
 /* ---------------- status / KPI computation ---------------- */
@@ -255,7 +258,7 @@ function showModal(titleHTML, bodyHTML, footHTML, opts){
 function closeModal(){ document.getElementById('modalBackdrop').hidden = true; }
 
 /* ---------------- routing ---------------- */
-const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', compose:'Compose', assistant:'Assistant', problemsolver:'Problem Solver', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', huddleregister:'Huddle Register', reports:'Reports', search:'Search', settings:'Settings' };
+const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', compose:'Compose', assistant:'Assistant', problemsolver:'Problem Solver', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', huddleregister:'Huddle Register', uniform:'Uniform Tracker', reports:'Reports', search:'Search', settings:'Settings' };
 
 function navigate(route){
   state.route = route;
@@ -295,6 +298,7 @@ async function render(){
     case 'sites': main.innerHTML = renderSites(); mountSites(); break;
     case 'fleetcheck': main.innerHTML = renderFleetCheck(); mountFleetCheck(); break;
     case 'huddleregister': main.innerHTML = renderHuddleRegister(); mountHuddleRegister(); break;
+    case 'uniform': main.innerHTML = renderUniformTracker(); mountUniformTracker(); break;
     case 'reports': main.innerHTML = renderReports(); mountReports(); break;
     case 'search': main.innerHTML = renderSearch(); mountSearch(); break;
     case 'settings': main.innerHTML = renderSettings(); mountSettings(); break;
@@ -2116,6 +2120,126 @@ function mountHuddleRegister(){
   }));
 }
 
+/* ================= UNIFORM TRACKER ================= */
+function uniformUsageForTech(techId, catalogItemId){
+  // Allowance is a rolling 12 months from each issue's own date, not a fixed
+  // calendar year — so what counts as "this year" is always a moving window
+  // ending today, per your steer.
+  const cutoffISO = toISO(addDays(new Date(), -365));
+  const issues = state.cache.uniformIssues.filter(i=>i.technicianId===techId && i.catalogItemId===catalogItemId && i.issueDate >= cutoffISO);
+  const usedQty = issues.reduce((sum,i)=>sum+(i.quantity||1), 0);
+  const lastIssued = issues.length ? issues.reduce((latest,i)=> i.issueDate>latest?i.issueDate:latest, issues[0].issueDate) : null;
+  let nextAvailable = null;
+  if(issues.length){
+    const oldest = issues.reduce((old,i)=> i.issueDate<old?i.issueDate:old, issues[0].issueDate);
+    nextAvailable = toISO(addDays(fromISO(oldest), 365));
+  }
+  return { usedQty, lastIssued, nextAvailable, issues };
+}
+function uniformTechSummary(techId){
+  const catalog = state.cache.uniformCatalog || [];
+  let atLimit = 0;
+  for(const item of catalog){
+    const { usedQty } = uniformUsageForTech(techId, item.id);
+    if(usedQty >= item.allowancePerAnnum) atLimit++;
+  }
+  return { atLimit };
+}
+function renderUniformTracker(){
+  if(state.uniformSelectedTechId) return renderUniformTrackerDetail(state.uniformSelectedTechId);
+  const techs = state.cache.technicians.filter(t=>t.active);
+  const rows = techs.length ? techs.map(t=>{
+    const { atLimit } = uniformTechSummary(t.id);
+    return `
+    <div class="watch-row" data-open-uniform-tech="${t.id}" style="cursor:pointer;">
+      <div><div class="watch-name">${escapeHTML(t.name)}</div><div class="watch-meta">${regionBadge(t.region)}</div></div>
+      <div class="watch-spacer"></div>
+      ${atLimit ? `<span class="badge" style="background:#FBF0D7;color:#7A5510;">${atLimit} at limit</span>` : ''}
+      <span style="color:var(--text-faint);">›</span>
+    </div>`;
+  }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:12px;">No active technicians yet.</p>`;
+  return `
+  <div class="view-head">
+    <div><h1>Uniform Tracker</h1><div class="view-sub">What's been issued to each technician, against their yearly allowance</div></div>
+  </div>
+  <div class="card" style="padding:4px 8px;max-width:560px;">${rows}</div>
+  `;
+}
+function renderUniformTrackerDetail(techId){
+  const tech = state.cache.technicians.find(t=>t.id===techId);
+  if(!tech){ state.uniformSelectedTechId = null; return renderUniformTracker(); }
+  const catalog = state.cache.uniformCatalog || [];
+  const rows = catalog.length ? catalog.map(item=>{
+    const { usedQty, lastIssued, nextAvailable } = uniformUsageForTech(techId, item.id);
+    const pct = Math.min(100, Math.round((usedQty/Math.max(1,item.allowancePerAnnum))*100));
+    const atLimit = usedQty >= item.allowancePerAnnum;
+    return `
+    <div class="card" style="padding:12px 13px;margin-bottom:8px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+        <span style="flex:1;font-size:12.5px;font-weight:600;color:var(--ink);">${escapeHTML(item.itemName)}${item.notes?` <span style="font-size:9.5px;font-weight:700;text-transform:uppercase;color:#7A5510;background:#FBF0D7;padding:2px 7px;border-radius:20px;margin-left:4px;">${escapeHTML(item.notes)}</span>`:''}</span>
+        <span style="font-size:11px;color:var(--text-dim);flex-shrink:0;">${usedQty} / ${item.allowancePerAnnum}</span>
+      </div>
+      <div style="height:5px;background:var(--line-soft);border-radius:4px;overflow:hidden;margin-bottom:7px;">
+        <div style="height:100%;width:${pct}%;background:${atLimit?'var(--gold)':'var(--forest-dim)'};"></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;font-size:11px;color:var(--text-faint);">
+        <span>${lastIssued ? `Last issued ${humanDateShort(lastIssued)}` : 'Never issued'}</span>
+        ${atLimit && nextAvailable ? `<span>· Next available ${humanDateShort(nextAvailable)}</span>` : ''}
+        <span style="margin-left:auto;"></span>
+        <button class="icon-btn" data-log-uniform-item="${item.id}">+ Log</button>
+      </div>
+    </div>`;
+  }).join('') : `<p style="font-size:12px;color:var(--text-faint);">No uniform catalog items yet — add some in Settings.</p>`;
+  return `
+  <div class="view-head">
+    <div>
+      <button class="btn-link" id="uniformBackBtn" style="margin:0 0 6px;padding:0;text-align:left;">‹ All technicians</button>
+      <h1>${escapeHTML(tech.name)}</h1>
+      <div class="view-sub">Uniform issued in the last 12 months, against allowance</div>
+    </div>
+  </div>
+  <div style="max-width:560px;">${rows}</div>
+  `;
+}
+function openLogUniformIssueModal(techId, catalogItemId){
+  const item = state.cache.uniformCatalog.find(c=>c.id===catalogItemId);
+  if(!item) return;
+  const body = `
+    <p style="font-size:13px;font-weight:600;color:var(--ink);margin-bottom:14px;">${escapeHTML(item.itemName)}</p>
+    <div class="field-row">
+      <div class="field"><label>Quantity</label><input type="number" id="uiQty" value="1" min="1"></div>
+      <div class="field"><label>Date issued</label><input type="date" id="uiDate" value="${todayISO()}"></div>
+    </div>
+    <div class="field"><label>Notes (optional)</label><input id="uiNotes" placeholder="e.g. Size L"></div>
+  `;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="uiCancel">Cancel</button><button class="btn" id="uiSave">Log issue</button></div>`;
+  showModal('Log a uniform issue', body, foot);
+  document.getElementById('uiCancel').addEventListener('click', closeModal);
+  document.getElementById('uiSave').addEventListener('click', async ()=>{
+    const quantity = Math.max(1, Number(document.getElementById('uiQty').value) || 1);
+    const issueDate = document.getElementById('uiDate').value || todayISO();
+    const notes = document.getElementById('uiNotes').value.trim();
+    await DB.add('uniform_issues', { technicianId: techId, catalogItemId, quantity, issueDate, notes, createdAt: new Date().toISOString() });
+    await refreshCache();
+    closeModal();
+    toast('Issue logged');
+    render();
+  });
+}
+function mountUniformTracker(){
+  document.querySelectorAll('[data-open-uniform-tech]').forEach(el=>el.addEventListener('click', ()=>{
+    state.uniformSelectedTechId = Number(el.dataset.openUniformTech);
+    render();
+  }));
+  document.getElementById('uniformBackBtn')?.addEventListener('click', ()=>{
+    state.uniformSelectedTechId = null;
+    render();
+  });
+  document.querySelectorAll('[data-log-uniform-item]').forEach(b=>b.addEventListener('click', ()=>{
+    openLogUniformIssueModal(state.uniformSelectedTechId, Number(b.dataset.logUniformItem));
+  }));
+}
+
 /* ================= REPORTS ================= */
 function isTechWorkingOn(technician, iso){
   // true if this is a day the technician is actually expected to be working:
@@ -3141,6 +3265,43 @@ function openEmailSettingsModal(){
     render();
   });
   document.getElementById('emailSettingsDone').addEventListener('click', ()=>{ closeModal(); render(); });
+}
+function openUniformItemForm(editId){
+  const existing = editId ? (state.cache.uniformCatalog||[]).find(c=>c.id===editId) : null;
+  const v = existing || { productCode:'', itemName:'', allowancePerAnnum:1, notes:'' };
+  const body = `
+    <div class="field"><label>Item name</label><input id="uiItemName" value="${escapeHTML(v.itemName)}" placeholder="e.g. Hi-Vis Safety Vest"></div>
+    <div class="field"><label>Product code(s)</label><input id="uiProductCode" value="${escapeHTML(v.productCode)}" placeholder="e.g. HVW01, or two codes for gendered sizing"></div>
+    <div class="field"><label>Allowance per year</label><input type="number" id="uiAllowance" value="${v.allowancePerAnnum}" min="1"></div>
+    <div class="field"><label>Notes (optional)</label><input id="uiItemNotes" value="${escapeHTML(v.notes)}" placeholder="e.g. Floristry only — informational only"></div>
+  `;
+  const foot = `
+    ${existing ? `<button class="btn btn-danger" id="uiDelete">Remove</button>` : `<span></span>`}
+    <div class="modal-foot-right"><button class="btn btn-outline" id="uiCancel">Cancel</button><button class="btn" id="uiSaveItem">${existing?'Save':'Add'}</button></div>
+  `;
+  showModal(existing?'Edit uniform item':'Add uniform item', body, foot);
+  document.getElementById('uiCancel').addEventListener('click', closeModal);
+  document.getElementById('uiDelete')?.addEventListener('click', async ()=>{
+    await DB.delete('uniform_catalog', editId);
+    closeModal(); toast('Item removed'); render();
+  });
+  document.getElementById('uiSaveItem').addEventListener('click', async ()=>{
+    const itemName = document.getElementById('uiItemName').value.trim();
+    if(!itemName){ toast('Enter an item name'); return; }
+    const obj = {
+      itemName,
+      productCode: document.getElementById('uiProductCode').value.trim(),
+      allowancePerAnnum: Math.max(1, Number(document.getElementById('uiAllowance').value) || 1),
+      notes: document.getElementById('uiItemNotes').value.trim(),
+    };
+    if(existing){
+      await DB.put('uniform_catalog', { ...existing, ...obj });
+    } else {
+      const maxOrder = Math.max(0, ...(state.cache.uniformCatalog||[]).map(c=>c.sortOrder||0));
+      await DB.add('uniform_catalog', { ...obj, sortOrder: maxOrder+1, createdAt: new Date().toISOString() });
+    }
+    closeModal(); toast(existing?'Item updated':'Item added'); render();
+  });
 }
 function openOutlookRuleForm(editId){
   const existing = editId ? (state.cache.outlookTypeRules||[]).find(r=>r.id===editId) : null;
@@ -4359,6 +4520,14 @@ function renderSettings(){
       <button class="icon-btn" data-del-outlook-rule="${r.id}">Remove</button>
     </div>`;
   }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No patterns yet — synced Outlook entries will all show as generic "Outlook" tiles until you add some.</p>`;
+  const uniformCatalog = state.cache.uniformCatalog || [];
+  const uniformCatalogRows = uniformCatalog.length ? uniformCatalog.map(item=>`
+    <div class="watch-row">
+      <div><div class="watch-name">${escapeHTML(item.itemName)}${item.notes?` <span class="badge" style="background:#FBF0D7;color:#7A5510;">${escapeHTML(item.notes)}</span>`:''}</div><div class="watch-meta">${escapeHTML(item.productCode||'No code set')} · ${item.allowancePerAnnum}/year</div></div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-edit-uniform-item="${item.id}">Edit</button>
+      <button class="icon-btn" data-del-uniform-item="${item.id}">Remove</button>
+    </div>`).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:4px 0;">No uniform items yet.</p>`;
   const eventTypeRows = eventTypeList().length ? eventTypeList().map(t=>{
     const usageCount = state.cache.events.filter(e=>e.type===t.key).length;
     return `
@@ -4448,6 +4617,14 @@ function renderSettings(){
       <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">Recognise these patterns in your Outlook titles so they're counted properly instead of showing as a duplicate. Checked in order — the first match wins.</p>
       <div id="outlookRuleList">${outlookRuleRows}</div>
       <button class="btn btn-outline btn-small" id="addOutlookRuleBtn" style="margin-top:8px;">+ Add a pattern</button>
+    </div>
+  </div>
+  <div class="card card-pad ${sc.uniform?'':'is-collapsed'}" style="max-width:480px;margin-top:16px;">
+    <button class="collapsible-header" data-collapse-toggle="uniform"><h3 style="margin-bottom:4px;">Uniform catalog</h3><span class="collapse-chevron">▾</span></button>
+    <div class="collapsible-body">
+      <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">The items technicians can be issued, and how many they're entitled to per year. Edit any time — changes apply to future logging, not past issues.</p>
+      <div id="uniformCatalogList">${uniformCatalogRows}</div>
+      <button class="btn btn-outline btn-small" id="addUniformItemBtn" style="margin-top:8px;">+ Add uniform item</button>
     </div>
   </div>
   <div class="card card-pad ${sc.data?'':'is-collapsed'}" style="max-width:480px;margin-top:16px;">
@@ -4710,6 +4887,12 @@ function mountSettings(){
     await DB.delete('outlook_type_rules', Number(b.dataset.delOutlookRule));
     toast('Pattern removed'); render();
   }));
+  document.getElementById('addUniformItemBtn').addEventListener('click', ()=>openUniformItemForm());
+  document.querySelectorAll('[data-edit-uniform-item]').forEach(b=>b.addEventListener('click', ()=>openUniformItemForm(Number(b.dataset.editUniformItem))));
+  document.querySelectorAll('[data-del-uniform-item]').forEach(b=>b.addEventListener('click', async ()=>{
+    await DB.delete('uniform_catalog', Number(b.dataset.delUniformItem));
+    toast('Item removed'); render();
+  }));
   document.getElementById('exportBtn').addEventListener('click', async ()=>{
     const data = {
       technicians: await DB.getAll('technicians'),
@@ -4728,6 +4911,8 @@ function mountSettings(){
       problemSessions: await DB.getAll('problem_sessions'),
       outlookEvents: await DB.getAll('outlook_events'),
       outlookTypeRules: await DB.getAll('outlook_type_rules'),
+      uniformCatalog: await DB.getAll('uniform_catalog'),
+      uniformIssues: await DB.getAll('uniform_issues'),
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
@@ -4780,6 +4965,8 @@ function confirmResetAll(){
     await DB.clear('problem_sessions');
     await DB.clear('outlook_events');
     await DB.clear('outlook_type_rules');
+    await DB.clear('uniform_catalog');
+    await DB.clear('uniform_issues');
     await seedIfEmpty();
     closeModal(); toast('All data reset');
     state.weekStart = mondayOf(new Date());

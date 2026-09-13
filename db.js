@@ -179,6 +179,19 @@ const ENSURE_OUTLOOK_TYPE_RULES = [
   { pattern:'SA Visit',          eventType:'qaVisit' },
   { pattern:'Triannual Review',  eventType:'oneOnOne' },
 ];
+const SEED_UNIFORM_CATALOG = [
+  { productCode:'TRA150', itemName:'Waterproof 2 in 1 Fleece/Jacket', allowancePerAnnum:1, notes:'', sortOrder:1 },
+  { productCode:'TRA820', itemName:'Gilet Bodywarmer', allowancePerAnnum:1, notes:'', sortOrder:2 },
+  { productCode:'TRA642', itemName:'Lightweight Zip Jacket', allowancePerAnnum:1, notes:'', sortOrder:3 },
+  { productCode:'Womens - NB52MBLAC / Mens - N119FBLAC', itemName:'Polo Tshirt', allowancePerAnnum:5, notes:'', sortOrder:4 },
+  { productCode:'PR692', itemName:'Sweatshirt', allowancePerAnnum:2, notes:'Floristry only', sortOrder:5 },
+  { productCode:'PR159BLAC', itemName:'Apron', allowancePerAnnum:2, notes:'Floristry only', sortOrder:6 },
+  { productCode:'HVW01', itemName:'Hi-Vis Safety Vest', allowancePerAnnum:1, notes:'', sortOrder:7 },
+  { productCode:'BC018', itemName:'Sun Cap Hat', allowancePerAnnum:1, notes:'', sortOrder:8 },
+  { productCode:'BC018BLAC', itemName:'Beanie Winter Hat', allowancePerAnnum:1, notes:'', sortOrder:9 },
+  { productCode:'Mens - 77521 / Womens - 77531', itemName:'HH Manchester Construction Trousers (Waist inch Size)', allowancePerAnnum:2, notes:'', sortOrder:10 },
+  { productCode:'Unisex - PT-B0136A', itemName:'Portwest - Trainers', allowancePerAnnum:2, notes:'', sortOrder:11 },
+];
 
 async function ensureOutlookRules(){
   const existing = await DB.getAll('outlook_type_rules');
@@ -231,6 +244,12 @@ async function seedIfEmpty(){
     }
   }
   await ensureOutlookRules();
+  const existingUniformCatalog = await DB.getAll('uniform_catalog');
+  if(existingUniformCatalog.length === 0){
+    for(const item of SEED_UNIFORM_CATALOG){
+      await DB.add('uniform_catalog', { ...item, createdAt: new Date().toISOString() });
+    }
+  }
   const settings = await DB.get('settings', 'settings');
   if(!settings){
     await DB.put('settings', { ...DEFAULT_SETTINGS });
