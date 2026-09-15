@@ -92,8 +92,9 @@ const state = {
   boardMobileDate: new Date(), // which single day the mobile Weekly Board is showing
   todoListTab: 'todo', // 'todo' | 'ongoing' | 'awaiting_reply'
   uniformSelectedTechId: null, // null = tracker shows the technician list
+  ladderSelectedTechId: null, // null = tracker shows the technician list
   todoViewDate: new Date(),
-  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[], problemSessions:[], outlookEvents:[], outlookTypeRules:[], uniformCatalog:[], uniformIssues:[] },
+  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[], problemSessions:[], outlookEvents:[], outlookTypeRules:[], uniformCatalog:[], uniformIssues:[], ladders:[], ladderInspections:[] },
 };
 
 const PRIORITY_RANK = { urgent:0, high:1, medium:2, low:3 };
@@ -119,8 +120,8 @@ function sortTodos(a, b){
   return new Date(b.createdAt) - new Date(a.createdAt); // final tiebreaker: newest first
 }
 async function refreshCache(){
-  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules, uniformCatalog, uniformIssues] = await Promise.all([
-    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples'), DB.getAll('email_drafts'), DB.getAll('content_analyses'), DB.getAll('problem_sessions'), DB.getAll('outlook_events'), DB.getAll('outlook_type_rules'), DB.getAll('uniform_catalog'), DB.getAll('uniform_issues')
+  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules, uniformCatalog, uniformIssues, ladders, ladderInspections] = await Promise.all([
+    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples'), DB.getAll('email_drafts'), DB.getAll('content_analyses'), DB.getAll('problem_sessions'), DB.getAll('outlook_events'), DB.getAll('outlook_type_rules'), DB.getAll('uniform_catalog'), DB.getAll('uniform_issues'), DB.getAll('ladders'), DB.getAll('ladder_inspections')
   ]);
   technicians.sort((a,b)=>a.name.localeCompare(b.name));
   sites.sort((a,b)=>a.name.localeCompare(b.name));
@@ -137,7 +138,9 @@ async function refreshCache(){
   outlookTypeRules.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
   uniformCatalog.sort((a,b)=> (a.sortOrder||0)-(b.sortOrder||0));
   uniformIssues.sort((a,b)=> b.issueDate.localeCompare(a.issueDate)); // newest first
-  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules, uniformCatalog, uniformIssues };
+  ladders.sort((a,b)=> new Date(a.createdAt) - new Date(b.createdAt));
+  ladderInspections.sort((a,b)=> b.inspectionDate.localeCompare(a.inspectionDate)); // newest first
+  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules, uniformCatalog, uniformIssues, ladders, ladderInspections };
 }
 
 /* ---------------- status / KPI computation ---------------- */
@@ -258,7 +261,7 @@ function showModal(titleHTML, bodyHTML, footHTML, opts){
 function closeModal(){ document.getElementById('modalBackdrop').hidden = true; }
 
 /* ---------------- routing ---------------- */
-const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', compose:'Compose', assistant:'Assistant', problemsolver:'Problem Solver', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', huddleregister:'Huddle Register', uniform:'Uniform Tracker', reports:'Reports', search:'Search', settings:'Settings' };
+const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', compose:'Compose', assistant:'Assistant', problemsolver:'Problem Solver', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', huddleregister:'Huddle Register', uniform:'Uniform Tracker', ladders:'Ladder Inspection', reports:'Reports', search:'Search', settings:'Settings' };
 
 function navigate(route){
   state.route = route;
@@ -299,6 +302,7 @@ async function render(){
     case 'fleetcheck': main.innerHTML = renderFleetCheck(); mountFleetCheck(); break;
     case 'huddleregister': main.innerHTML = renderHuddleRegister(); mountHuddleRegister(); break;
     case 'uniform': main.innerHTML = renderUniformTracker(); mountUniformTracker(); break;
+    case 'ladders': main.innerHTML = renderLadderTracker(); mountLadderTracker(); break;
     case 'reports': main.innerHTML = renderReports(); mountReports(); break;
     case 'search': main.innerHTML = renderSearch(); mountSearch(); break;
     case 'settings': main.innerHTML = renderSettings(); mountSettings(); break;
@@ -2347,6 +2351,220 @@ function mountUniformTracker(){
   document.querySelectorAll('[data-log-uniform-item]').forEach(b=>b.addEventListener('click', ()=>{
     openLogUniformIssueModal(state.uniformSelectedTechId, Number(b.dataset.logUniformItem));
   }));
+}
+
+/* ================= LADDER INSPECTION TRACKER ================= */
+function ladderStatus(ladder){
+  const inspections = state.cache.ladderInspections.filter(i=>i.ladderId===ladder.id);
+  if(!inspections.length) return { state:'never', label:'Not yet inspected', lastDate:null, lastResult:null, daysSince:null };
+  const last = inspections.reduce((latest,i)=> i.inspectionDate>latest.inspectionDate?i:latest, inspections[0]);
+  const daysSince = Math.floor((fromISO(todayISO()) - fromISO(last.inspectionDate)) / 86400000);
+  const freq = ladder.inspectionFrequencyDays || 180;
+  const daysLeft = freq - daysSince;
+  let stateKey, label;
+  if(daysLeft < 0){ stateKey='overdue'; label='Overdue'; }
+  else if(daysLeft <= 14){ stateKey='due'; label=`Due in ${daysLeft} day${daysLeft===1?'':'s'}`; }
+  else { stateKey='ok'; label='OK'; }
+  return { state: stateKey, label, lastDate: last.inspectionDate, lastResult: last.result, daysSince };
+}
+function ladderLocationLabel(ladder){
+  if(ladder.locationType === 'site'){
+    const name = siteName(ladder.siteId);
+    return name ? `📍 Kept at ${name}` : '📍 Site (removed)';
+  }
+  return '🚐 Van';
+}
+function techLadderSummary(techId){
+  const ladders = state.cache.ladders.filter(l=>l.technicianId===techId);
+  if(!ladders.length) return { count:0, worstState:'none' };
+  const rank = { overdue:0, due:1, never:2, ok:3 };
+  const worstState = ladders.map(l=>ladderStatus(l).state).reduce((worst,s)=> rank[s]<rank[worst]?s:worst, 'ok');
+  return { count: ladders.length, worstState };
+}
+function ladderStatusBadgeHTML(summary){
+  if(summary.count === 0) return `<span class="badge badge-neutral">No ladder recorded</span>`;
+  const label = summary.worstState==='overdue' ? 'Overdue' : summary.worstState==='due' ? 'Due soon' : summary.worstState==='never' ? 'Not inspected' : 'OK';
+  const cls = summary.worstState==='overdue' ? 'badge-overdue' : summary.worstState==='due' ? 'badge-due' : summary.worstState==='never' ? 'badge-neutral' : 'badge-ok';
+  return `<span class="badge ${cls}">${label}${summary.count>1?` · ${summary.count} ladders`:''}</span>`;
+}
+function renderLadderTracker(){
+  if(state.ladderSelectedTechId) return renderLadderTrackerDetail(state.ladderSelectedTechId);
+  const techs = state.cache.technicians.filter(t=>t.active);
+  const rows = techs.length ? techs.map(t=>{
+    const summary = techLadderSummary(t.id);
+    return `
+    <div class="watch-row" data-open-ladder-tech="${t.id}" style="cursor:pointer;">
+      <div><div class="watch-name">${escapeHTML(t.name)}</div><div class="watch-meta">${regionBadge(t.region)}${t.isDriver?' <span class="badge badge-neutral">Driver</span>':''}</div></div>
+      <div class="watch-spacer"></div>
+      ${ladderStatusBadgeHTML(summary)}
+      <span style="color:var(--text-faint);">›</span>
+    </div>`;
+  }).join('') : `<p style="font-size:12px;color:var(--text-faint);margin:12px;">No active technicians yet.</p>`;
+  return `
+  <div class="view-head">
+    <div><h1>Ladder Inspection</h1><div class="view-sub">Where each technician's ladder is kept, and when it was last checked</div></div>
+  </div>
+  <div class="card" style="padding:4px 8px;max-width:560px;">${rows}</div>
+  `;
+}
+function renderLadderTrackerDetail(techId){
+  const tech = state.cache.technicians.find(t=>t.id===techId);
+  if(!tech){ state.ladderSelectedTechId = null; return renderLadderTracker(); }
+  const ladders = state.cache.ladders.filter(l=>l.technicianId===techId);
+  const cards = ladders.length ? ladders.map(l=>{
+    const status = ladderStatus(l);
+    const badgeCls = status.state==='overdue' ? 'badge-overdue' : status.state==='due' ? 'badge-due' : status.state==='never' ? 'badge-neutral' : 'badge-ok';
+    return `
+    <div class="card" style="padding:13px 14px;margin-bottom:9px;">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:6px;">
+        <div>
+          <div style="font-size:12.5px;font-weight:600;color:var(--ink);">${ladderLocationLabel(l)}</div>
+          ${l.notes?`<div style="font-size:11.5px;color:var(--text-dim);margin-top:2px;">${escapeHTML(l.notes)}</div>`:''}
+        </div>
+        <span class="badge ${badgeCls}">${status.label}</span>
+      </div>
+      <div style="font-size:11px;color:var(--text-faint);margin-bottom:9px;">
+        ${status.lastDate ? `Last inspected ${humanDateShort(status.lastDate)} · ${status.lastResult==='fail'?'Failed':'Passed'} · every ${l.inspectionFrequencyDays||180} days` : `Never inspected · every ${l.inspectionFrequencyDays||180} days`}
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="icon-btn" data-log-ladder="${l.id}">+ Log inspection</button>
+        <button class="icon-btn" data-edit-ladder="${l.id}">Edit</button>
+        <button class="icon-btn" data-del-ladder="${l.id}">Remove</button>
+      </div>
+    </div>`;
+  }).join('') : `<p style="font-size:12px;color:var(--text-faint);">No ladders recorded for ${escapeHTML(tech.name)} yet.</p>`;
+  return `
+  <div class="view-head">
+    <div>
+      <button class="btn-link" id="ladderBackBtn" style="margin:0 0 6px;padding:0;text-align:left;">‹ All technicians</button>
+      <h1>${escapeHTML(tech.name)}</h1>
+      <div class="view-sub">${tech.isDriver?'Driver':'Non-driver'} — can have more than one ladder recorded</div>
+    </div>
+  </div>
+  <div style="max-width:560px;">
+    ${cards}
+    <button class="btn btn-outline" id="ladderAddBtn" style="width:100%;justify-content:center;border-style:dashed;">+ Add a ladder</button>
+  </div>
+  `;
+}
+function openLadderForm(techId, editId){
+  const tech = state.cache.technicians.find(t=>t.id===techId);
+  const existing = editId ? state.cache.ladders.find(l=>l.id===editId) : null;
+  const v = existing || { locationType: tech?.isDriver ? 'van' : 'site', siteId:'', notes:'', inspectionFrequencyDays:180 };
+  const siteOptions = state.cache.sites.filter(s=>s.active).map(s=>`<option value="${s.id}" ${v.siteId==s.id?'selected':''}>${escapeHTML(s.name)}</option>`).join('');
+  const body = `
+    <div class="field">
+      <label>Where is it kept?</label>
+      <div class="chip-filter">
+        <button class="chip ${v.locationType==='van'?'active':''}" data-ll-type="van">🚐 Van</button>
+        <button class="chip ${v.locationType==='site'?'active':''}" data-ll-type="site">📍 A site</button>
+      </div>
+    </div>
+    <div class="field" id="llSiteField" style="${v.locationType==='site'?'':'display:none;'}">
+      <label>Site</label>
+      <select id="llSite"><option value="">—</option>${siteOptions}</select>
+    </div>
+    <div class="field"><label>Ladder type / notes</label><input id="llNotes" value="${escapeHTML(v.notes||'')}" placeholder="e.g. 5-step combination ladder"></div>
+    <div class="field"><label>Inspection cadence (days)</label><input type="number" id="llFreq" value="${v.inspectionFrequencyDays||180}" min="1">
+      <div class="freq-hint">Defaults to 180 days (every 6 months). Used to flag when this ladder is due or overdue.</div>
+    </div>
+  `;
+  const foot = `
+    ${existing ? `<button class="btn btn-danger" id="llDelete">Remove</button>` : `<span></span>`}
+    <div class="modal-foot-right"><button class="btn btn-outline" id="llCancel">Cancel</button><button class="btn" id="llSave">${existing?'Save':'Add'}</button></div>
+  `;
+  showModal(existing?'Edit ladder':'Add a ladder', body, foot);
+  let selectedType = v.locationType;
+  document.querySelectorAll('[data-ll-type]').forEach(chip=>chip.addEventListener('click', ()=>{
+    selectedType = chip.dataset.llType;
+    document.querySelectorAll('[data-ll-type]').forEach(c=>c.classList.toggle('active', c.dataset.llType===selectedType));
+    document.getElementById('llSiteField').style.display = selectedType==='site' ? '' : 'none';
+  }));
+  document.getElementById('llCancel').addEventListener('click', closeModal);
+  document.getElementById('llDelete')?.addEventListener('click', async ()=>{
+    await DB.delete('ladders', editId);
+    closeModal(); toast('Ladder removed'); render();
+  });
+  document.getElementById('llSave').addEventListener('click', async ()=>{
+    const siteId = selectedType==='site' ? (document.getElementById('llSite').value || null) : null;
+    const obj = {
+      technicianId: techId,
+      locationType: selectedType,
+      siteId: siteId ? Number(siteId) : null,
+      notes: document.getElementById('llNotes').value.trim(),
+      inspectionFrequencyDays: Math.max(1, Number(document.getElementById('llFreq').value) || 180),
+    };
+    if(existing){
+      await DB.put('ladders', { ...existing, ...obj });
+    } else {
+      await DB.add('ladders', { ...obj, createdAt: new Date().toISOString() });
+    }
+    closeModal(); toast(existing?'Ladder updated':'Ladder added'); render();
+  });
+}
+function openLogLadderInspectionModal(ladderId){
+  const ladder = state.cache.ladders.find(l=>l.id===ladderId);
+  if(!ladder) return;
+  const tech = state.cache.technicians.find(t=>t.id===ladder.technicianId);
+  const body = `
+    <p style="font-size:13px;font-weight:600;color:var(--ink);margin-bottom:14px;">${escapeHTML(tech?.name||'')} — ${ladderLocationLabel(ladder)}</p>
+    <div class="field"><label>Date</label><input type="date" id="liDate" value="${todayISO()}"></div>
+    <div class="field">
+      <label>Result</label>
+      <div class="chip-filter">
+        <button class="chip active" data-li-result="pass" style="background:var(--forest-dim);border-color:var(--forest-dim);">✓ Pass</button>
+        <button class="chip" data-li-result="fail">✕ Fail</button>
+      </div>
+    </div>
+    <div class="field"><label>Notes (optional)</label><input id="liNotes" placeholder="e.g. Feet worn, due for replacement"></div>
+  `;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="liCancel">Cancel</button><button class="btn" id="liSave">Log inspection</button></div>`;
+  showModal('Log an inspection', body, foot);
+  let selectedResult = 'pass';
+  document.querySelectorAll('[data-li-result]').forEach(chip=>chip.addEventListener('click', ()=>{
+    selectedResult = chip.dataset.liResult;
+    document.querySelectorAll('[data-li-result]').forEach(c=>{
+      const isActive = c.dataset.liResult===selectedResult;
+      c.classList.toggle('active', isActive);
+      c.style.background = isActive ? (selectedResult==='fail' ? 'var(--clay)' : 'var(--forest-dim)') : '';
+      c.style.borderColor = isActive ? (selectedResult==='fail' ? 'var(--clay)' : 'var(--forest-dim)') : '';
+    });
+  }));
+  document.getElementById('liCancel').addEventListener('click', closeModal);
+  document.getElementById('liSave').addEventListener('click', async ()=>{
+    const inspectionDate = document.getElementById('liDate').value || todayISO();
+    const notes = document.getElementById('liNotes').value.trim();
+    await DB.add('ladder_inspections', { ladderId, inspectionDate, result: selectedResult, notes, createdAt: new Date().toISOString() });
+    if(selectedResult === 'fail'){
+      await DB.add('todos', {
+        text: `Ladder needs attention — ${escapeHTML(tech?.name||'')} (${ladderLocationLabel(ladder).replace(/^[^ ]+ /,'')})${notes?`: ${notes}`:''}`,
+        completed:false, dueDate: todayISO(), alertAt:null, alertFired:false, priority:'high',
+        list:'todo', listChangedAt: new Date().toISOString(), followUpDate:null, followUpAction:'alert', followUpDone:false,
+        source:'ladder-inspection', sourceRef: String(ladderId), createdAt: new Date().toISOString(),
+      });
+    }
+    await refreshCache();
+    closeModal();
+    toast(selectedResult==='fail' ? 'Inspection logged — a To-Do was added' : 'Inspection logged');
+    render();
+  });
+}
+function mountLadderTracker(){
+  document.querySelectorAll('[data-open-ladder-tech]').forEach(el=>el.addEventListener('click', ()=>{
+    state.ladderSelectedTechId = Number(el.dataset.openLadderTech);
+    render();
+  }));
+  document.getElementById('ladderBackBtn')?.addEventListener('click', ()=>{
+    state.ladderSelectedTechId = null;
+    render();
+  });
+  document.getElementById('ladderAddBtn')?.addEventListener('click', ()=>openLadderForm(state.ladderSelectedTechId));
+  document.querySelectorAll('[data-edit-ladder]').forEach(b=>b.addEventListener('click', ()=>openLadderForm(state.ladderSelectedTechId, Number(b.dataset.editLadder))));
+  document.querySelectorAll('[data-del-ladder]').forEach(b=>b.addEventListener('click', async ()=>{
+    await DB.delete('ladders', Number(b.dataset.delLadder));
+    toast('Ladder removed'); render();
+  }));
+  document.querySelectorAll('[data-log-ladder]').forEach(b=>b.addEventListener('click', ()=>openLogLadderInspectionModal(Number(b.dataset.logLadder))));
 }
 
 /* ================= REPORTS ================= */
@@ -5022,6 +5240,8 @@ function mountSettings(){
       outlookTypeRules: await DB.getAll('outlook_type_rules'),
       uniformCatalog: await DB.getAll('uniform_catalog'),
       uniformIssues: await DB.getAll('uniform_issues'),
+      ladders: await DB.getAll('ladders'),
+      ladderInspections: await DB.getAll('ladder_inspections'),
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
@@ -5076,6 +5296,8 @@ function confirmResetAll(){
     await DB.clear('outlook_type_rules');
     await DB.clear('uniform_catalog');
     await DB.clear('uniform_issues');
+    await DB.clear('ladders');
+    await DB.clear('ladder_inspections');
     await seedIfEmpty();
     closeModal(); toast('All data reset');
     state.weekStart = mondayOf(new Date());
