@@ -93,8 +93,10 @@ const state = {
   todoListTab: 'todo', // 'todo' | 'ongoing' | 'awaiting_reply'
   uniformSelectedTechId: null, // null = tracker shows the technician list
   ladderSelectedTechId: null, // null = tracker shows the technician list
+  notesSelectedId: null, // null = notes shows the list only (mobile) / nothing selected (desktop)
+  notesSearchQuery: '',
   todoViewDate: new Date(),
-  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[], problemSessions:[], outlookEvents:[], outlookTypeRules:[], uniformCatalog:[], uniformIssues:[], ladders:[], ladderInspections:[] },
+  cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[], problemSessions:[], outlookEvents:[], outlookTypeRules:[], uniformCatalog:[], uniformIssues:[], ladders:[], ladderInspections:[], notes:[], noteLinks:[] },
 };
 
 const PRIORITY_RANK = { urgent:0, high:1, medium:2, low:3 };
@@ -120,8 +122,8 @@ function sortTodos(a, b){
   return new Date(b.createdAt) - new Date(a.createdAt); // final tiebreaker: newest first
 }
 async function refreshCache(){
-  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules, uniformCatalog, uniformIssues, ladders, ladderInspections] = await Promise.all([
-    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples'), DB.getAll('email_drafts'), DB.getAll('content_analyses'), DB.getAll('problem_sessions'), DB.getAll('outlook_events'), DB.getAll('outlook_type_rules'), DB.getAll('uniform_catalog'), DB.getAll('uniform_issues'), DB.getAll('ladders'), DB.getAll('ladder_inspections')
+  const [technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules, uniformCatalog, uniformIssues, ladders, ladderInspections, notes, noteLinks] = await Promise.all([
+    DB.getAll('technicians'), DB.getAll('sites'), DB.getAll('events'), DB.get('settings','settings'), DB.getAll('recurring_blocks'), DB.getAll('huddle_attendance'), DB.getAll('fleetcheck_records'), DB.getAll('todos'), DB.getAll('zones'), DB.getAll('event_types'), DB.getAll('email_voice_samples'), DB.getAll('email_drafts'), DB.getAll('content_analyses'), DB.getAll('problem_sessions'), DB.getAll('outlook_events'), DB.getAll('outlook_type_rules'), DB.getAll('uniform_catalog'), DB.getAll('uniform_issues'), DB.getAll('ladders'), DB.getAll('ladder_inspections'), DB.getAll('notes'), DB.getAll('note_links')
   ]);
   technicians.sort((a,b)=>a.name.localeCompare(b.name));
   sites.sort((a,b)=>a.name.localeCompare(b.name));
@@ -140,7 +142,8 @@ async function refreshCache(){
   uniformIssues.sort((a,b)=> b.issueDate.localeCompare(a.issueDate)); // newest first
   ladders.sort((a,b)=> new Date(a.createdAt) - new Date(b.createdAt));
   ladderInspections.sort((a,b)=> b.inspectionDate.localeCompare(a.inspectionDate)); // newest first
-  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules, uniformCatalog, uniformIssues, ladders, ladderInspections };
+  notes.sort((a,b)=> new Date(b.updatedAt) - new Date(a.updatedAt)); // most recently edited first
+  state.cache = { technicians, sites, events, settings, recurringBlocks, huddleAttendance, fleetcheckRecords, todos, zones, eventTypes, emailVoiceSamples, emailDrafts, contentAnalyses, problemSessions, outlookEvents, outlookTypeRules, uniformCatalog, uniformIssues, ladders, ladderInspections, notes, noteLinks };
 }
 
 /* ---------------- status / KPI computation ---------------- */
@@ -261,7 +264,7 @@ function showModal(titleHTML, bodyHTML, footHTML, opts){
 function closeModal(){ document.getElementById('modalBackdrop').hidden = true; }
 
 /* ---------------- routing ---------------- */
-const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', compose:'Compose', assistant:'Assistant', problemsolver:'Problem Solver', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', huddleregister:'Huddle Register', uniform:'Uniform Tracker', ladders:'Ladder Inspection', reports:'Reports', search:'Search', settings:'Settings' };
+const ROUTE_TITLES = { dashboard:'Dashboard', todos:'To-Do', compose:'Compose', assistant:'Assistant', problemsolver:'Problem Solver', notes:'Notes', schedule:'Weekly board', technicians:'Technicians', sites:'Client sites', fleetcheck:'FleetCheck', huddleregister:'Huddle Register', uniform:'Uniform Tracker', ladders:'Ladder Inspection', reports:'Reports', search:'Search', settings:'Settings' };
 
 function navigate(route){
   state.route = route;
@@ -303,6 +306,7 @@ async function render(){
     case 'huddleregister': main.innerHTML = renderHuddleRegister(); mountHuddleRegister(); break;
     case 'uniform': main.innerHTML = renderUniformTracker(); mountUniformTracker(); break;
     case 'ladders': main.innerHTML = renderLadderTracker(); mountLadderTracker(); break;
+    case 'notes': main.innerHTML = renderNotes(); await mountNotes(); break;
     case 'reports': main.innerHTML = renderReports(); mountReports(); break;
     case 'search': main.innerHTML = renderSearch(); mountSearch(); break;
     case 'settings': main.innerHTML = renderSettings(); mountSettings(); break;
@@ -1385,7 +1389,14 @@ const EXPORT_LIBS = {
   jspdf: 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
   jspdfAutotable: 'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js',
   mammoth: 'https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js',
+  quill: 'https://cdnjs.cloudflare.com/ajax/libs/quill/1.3.7/quill.min.js',
 };
+function loadStylesheetOnce(href){
+  if(document.querySelector(`link[href="${href}"]`)) return;
+  const l = document.createElement('link');
+  l.rel = 'stylesheet'; l.href = href;
+  document.head.appendChild(l);
+}
 const _loadedScripts = {};
 function loadScriptOnce(src){
   return new Promise((resolve, reject)=>{
@@ -2565,6 +2576,253 @@ function mountLadderTracker(){
     toast('Ladder removed'); render();
   }));
   document.querySelectorAll('[data-log-ladder]').forEach(b=>b.addEventListener('click', ()=>openLogLadderInspectionModal(Number(b.dataset.logLadder))));
+}
+
+/* ================= SMART NOTES ================= */
+function noteSnippet(html, maxLen){
+  const text = (html||'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
+  return text.length > (maxLen||70) ? text.slice(0, maxLen||70) + '…' : (text || 'No content yet');
+}
+function noteLinksForNote(noteId){
+  return state.cache.noteLinks.filter(l=>l.noteId===noteId).map(l=>{
+    if(l.todoId){ const t = state.cache.todos.find(x=>x.id===l.todoId); return t ? { id:l.id, kind:'todo', label:t.text, icon:'☑' } : null; }
+    if(l.siteId){ const s = state.cache.sites.find(x=>x.id===l.siteId); return s ? { id:l.id, kind:'site', label:s.name, icon:'◈' } : null; }
+    if(l.technicianId){ const t = state.cache.technicians.find(x=>x.id===l.technicianId); return t ? { id:l.id, kind:'technician', label:t.name, icon:'◔' } : null; }
+    return null;
+  }).filter(Boolean); // a link whose target was deleted just quietly disappears here — nothing more to clean up client-side, the DB cascade already removed the row itself
+}
+function notesForLinkedItem(kind, id){
+  const links = state.cache.noteLinks.filter(l=>
+    (kind==='todo' && l.todoId===id) || (kind==='site' && l.siteId===id) || (kind==='technician' && l.technicianId===id)
+  );
+  return links.map(l=>state.cache.notes.find(n=>n.id===l.noteId)).filter(Boolean);
+}
+function renderNotes(){
+  return isMobileViewport() ? renderNotesMobile() : renderNotesDesktop();
+}
+function notesListItemsHTML(){
+  const q = (state.notesSearchQuery||'').toLowerCase().trim();
+  let list = state.cache.notes;
+  if(q) list = list.filter(n=> n.title.toLowerCase().includes(q) || (n.content||'').toLowerCase().includes(q));
+  if(!list.length) return `<p style="font-size:12px;color:var(--text-faint);padding:14px;">No notes yet.</p>`;
+  return list.map(n=>{
+    const links = noteLinksForNote(n.id);
+    return `
+    <div class="note-list-item ${state.notesSelectedId===n.id?'active':''}" data-open-note="${n.id}">
+      <div class="note-list-title">${escapeHTML(n.title||'Untitled note')}</div>
+      <div class="note-list-snippet">${escapeHTML(noteSnippet(n.content))}</div>
+      <div class="note-list-meta">${humanDateShort(toISO(new Date(n.updatedAt)))} · ${new Date(n.updatedAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}${links.length?` <span class="link-chip-mini">🔗 ${links.length}</span>`:''}</div>
+    </div>`;
+  }).join('');
+}
+function noteEditorHeaderHTML(note){
+  const links = noteLinksForNote(note.id);
+  const linkChips = links.map(l=>`<span class="note-link-chip">${l.icon} ${escapeHTML(l.label)} <button data-remove-note-link="${l.id}">✕</button></span>`).join('');
+  return `
+    <div class="note-links-row">${linkChips}<button class="icon-btn" id="noteLinkBtn">🔗 Link</button></div>
+    <input class="note-title-input" id="noteTitleInput" value="${escapeHTML(note.title)}" placeholder="Untitled note">
+    <div class="note-ts">Created ${humanDateShort(toISO(new Date(note.createdAt)))} · Edited ${humanDateShort(toISO(new Date(note.updatedAt)))}, ${new Date(note.updatedAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}</div>
+  `;
+}
+function renderNotesDesktop(){
+  const selected = state.notesSelectedId ? state.cache.notes.find(n=>n.id===state.notesSelectedId) : null;
+  return `
+  <div class="view-head"><div><h1>Notes</h1></div></div>
+  <div class="notes-split">
+    <div class="notes-sidebar">
+      <button class="btn" id="newNoteBtn" style="width:100%;justify-content:center;margin-bottom:10px;">+ New note</button>
+      <input class="notes-search" id="notesSearchInput" placeholder="🔍 Search notes…" value="${escapeHTML(state.notesSearchQuery||'')}">
+      <div class="notes-list-scroll">${notesListItemsHTML()}</div>
+    </div>
+    <div class="notes-editor">
+      ${selected ? `
+        <div id="noteEditorHeader">${noteEditorHeaderHTML(selected)}</div>
+        <div id="quillToolbar"></div>
+        <div id="quillEditor"></div>
+      ` : `<div class="notes-empty">Select a note, or create a new one.</div>`}
+    </div>
+  </div>
+  `;
+}
+function renderNotesMobile(){
+  if(state.notesSelectedId){
+    const note = state.cache.notes.find(n=>n.id===state.notesSelectedId);
+    if(!note){ state.notesSelectedId = null; return renderNotesMobile(); }
+    return `
+    <div class="view-head">
+      <div><button class="btn-link" id="notesBackBtn" style="margin:0;padding:0;">‹ All notes</button></div>
+    </div>
+    <div id="noteEditorHeader">${noteEditorHeaderHTML(note)}</div>
+    <div id="quillToolbar"></div>
+    <div id="quillEditor"></div>
+    `;
+  }
+  return `
+  <div class="view-head"><div><h1>Notes</h1></div></div>
+  <input class="notes-search" id="notesSearchInput" placeholder="🔍 Search notes…" value="${escapeHTML(state.notesSearchQuery||'')}" style="margin-bottom:10px;">
+  <div class="notes-list-mobile">${notesListItemsHTML()}</div>
+  <button class="btn" id="newNoteBtn" style="width:100%;justify-content:center;margin-top:12px;">+ New note</button>
+  `;
+}
+async function createNewNote(){
+  const id = await DB.add('notes', { title:'Untitled note', content:'', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  await refreshCache();
+  state.notesSelectedId = id;
+  render();
+}
+function openNoteLinkPicker(noteId){
+  let activeTab = 'todo';
+  const existingLinks = state.cache.noteLinks.filter(l=>l.noteId===noteId);
+  const isLinked = (kind, id)=> existingLinks.some(l=> (kind==='todo'&&l.todoId===id) || (kind==='site'&&l.siteId===id) || (kind==='technician'&&l.technicianId===id));
+  function optionsHTML(tab){
+    const items = tab==='todo' ? state.cache.todos.filter(t=>!t.completed).map(t=>({id:t.id,label:t.text}))
+      : tab==='site' ? state.cache.sites.filter(s=>s.active).map(s=>({id:s.id,label:s.name}))
+      : state.cache.technicians.filter(t=>t.active).map(t=>({id:t.id,label:t.name}));
+    if(!items.length) return `<p style="font-size:12px;color:var(--text-faint);padding:10px 4px;">Nothing to link here yet.</p>`;
+    return items.map(it=>`
+      <div class="watch-row" data-pick-link="${it.id}" style="cursor:pointer;">
+        <div class="watch-name">${escapeHTML(it.label)}</div>
+        <div class="watch-spacer"></div>
+        ${isLinked(tab, it.id) ? '<span class="badge badge-ok">Linked</span>' : ''}
+      </div>`).join('');
+  }
+  function renderBody(){
+    return `
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">A note can link to more than one thing — pick as many as make sense.</p>
+      <div class="chip-filter" style="margin-bottom:12px;" id="noteLinkTabs">
+        <button class="chip ${activeTab==='todo'?'active':''}" data-link-tab="todo">To-Do</button>
+        <button class="chip ${activeTab==='site'?'active':''}" data-link-tab="site">Sites</button>
+        <button class="chip ${activeTab==='technician'?'active':''}" data-link-tab="technician">Technicians</button>
+      </div>
+      <div id="noteLinkOptions" style="max-height:320px;overflow-y:auto;">${optionsHTML(activeTab)}</div>
+    `;
+  }
+  function wire(){
+    document.querySelectorAll('[data-link-tab]').forEach(b=>b.addEventListener('click', ()=>{
+      activeTab = b.dataset.linkTab;
+      document.getElementById('noteLinkTabs').outerHTML = `<div class="chip-filter" style="margin-bottom:12px;" id="noteLinkTabs">
+        <button class="chip ${activeTab==='todo'?'active':''}" data-link-tab="todo">To-Do</button>
+        <button class="chip ${activeTab==='site'?'active':''}" data-link-tab="site">Sites</button>
+        <button class="chip ${activeTab==='technician'?'active':''}" data-link-tab="technician">Technicians</button>
+      </div>`;
+      document.getElementById('noteLinkOptions').innerHTML = optionsHTML(activeTab);
+      wire();
+    }));
+    document.querySelectorAll('[data-pick-link]').forEach(row=>row.addEventListener('click', async ()=>{
+      const id = Number(row.dataset.pickLink);
+      const already = existingLinks.find(l=> (activeTab==='todo'&&l.todoId===id) || (activeTab==='site'&&l.siteId===id) || (activeTab==='technician'&&l.technicianId===id));
+      if(already){
+        await DB.delete('note_links', already.id);
+        existingLinks.splice(existingLinks.indexOf(already), 1);
+      } else {
+        const payload = { noteId, todoId: activeTab==='todo'?id:null, siteId: activeTab==='site'?id:null, technicianId: activeTab==='technician'?id:null, createdAt: new Date().toISOString() };
+        const newId = await DB.add('note_links', payload);
+        existingLinks.push({ id:newId, ...payload });
+      }
+      await refreshCache();
+      document.getElementById('noteLinkOptions').innerHTML = optionsHTML(activeTab);
+      wire();
+    }));
+  }
+  showModal('Link this note', renderBody(), `<span></span><div class="modal-foot-right"><button class="btn" id="noteLinkDone">Done</button></div>`);
+  wire();
+  document.getElementById('noteLinkDone').addEventListener('click', ()=>{ closeModal(); render(); });
+}
+let _quillInstance = null;
+let _noteSaveTimeout = null;
+async function initQuillEditor(note){
+  await loadScriptOnce(EXPORT_LIBS.quill);
+  loadStylesheetOnce('https://cdnjs.cloudflare.com/ajax/libs/quill/1.3.7/quill.snow.css');
+  await new Promise(r=>setTimeout(r, 30)); // let the stylesheet apply before mounting, avoids a flash of unstyled toolbar
+  _quillInstance = new Quill('#quillEditor', {
+    theme: 'snow',
+    modules: {
+      toolbar: {
+        container: [['bold','italic','underline'], [{list:'ordered'},{list:'bullet'}], ['image']],
+        handlers: { image: () => handleNoteImageInsert() },
+      },
+    },
+  });
+  _quillInstance.root.innerHTML = note.content || '';
+  _quillInstance.on('text-change', ()=>{
+    clearTimeout(_noteSaveTimeout);
+    _noteSaveTimeout = setTimeout(()=>saveCurrentNote(false), 700);
+  });
+}
+async function saveCurrentNote(immediate){
+  if(!state.notesSelectedId || !_quillInstance) return;
+  const titleEl = document.getElementById('noteTitleInput');
+  const title = (titleEl?.value || '').trim() || 'Untitled note';
+  const content = _quillInstance.root.innerHTML;
+  const existing = state.cache.notes.find(n=>n.id===state.notesSelectedId);
+  await DB.put('notes', { ...existing, title, content, updatedAt: new Date().toISOString() });
+  await refreshCache();
+  // light DOM touch-up so the sidebar reflects the latest edit without a full
+  // re-render, which would otherwise tear down the editor mid-keystroke
+  const item = document.querySelector(`[data-open-note="${state.notesSelectedId}"]`);
+  if(item){
+    item.querySelector('.note-list-title').textContent = title;
+    item.querySelector('.note-list-snippet').textContent = noteSnippet(content);
+  }
+}
+function handleNoteImageInsert(){
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.onchange = async ()=>{
+    const file = input.files[0];
+    if(!file) return;
+    const range = _quillInstance.getSelection(true);
+    _quillInstance.insertText(range.index, 'Uploading image…', { italic: true });
+    try{
+      const url = await uploadNoteImage(file);
+      _quillInstance.deleteText(range.index, 'Uploading image…'.length);
+      _quillInstance.insertEmbed(range.index, 'image', url);
+      _quillInstance.setSelection(range.index + 1);
+    } catch(e){
+      _quillInstance.deleteText(range.index, 'Uploading image…'.length);
+      toast(e?.message || 'Could not upload that image');
+    }
+  };
+  input.click();
+}
+async function mountNotes(){
+  document.getElementById('newNoteBtn')?.addEventListener('click', createNewNote);
+  document.getElementById('notesBackBtn')?.addEventListener('click', async ()=>{
+    await saveCurrentNote(true);
+    state.notesSelectedId = null;
+    render();
+  });
+  document.getElementById('notesSearchInput')?.addEventListener('input', (e)=>{
+    state.notesSearchQuery = e.target.value;
+    document.querySelector(isMobileViewport() ? '.notes-list-mobile' : '.notes-list-scroll').innerHTML = notesListItemsHTML();
+    document.querySelectorAll('[data-open-note]').forEach(el=>el.addEventListener('click', async ()=>{
+      await saveCurrentNote(true);
+      state.notesSelectedId = Number(el.dataset.openNote);
+      render();
+    }));
+  });
+  document.querySelectorAll('[data-open-note]').forEach(el=>el.addEventListener('click', async ()=>{
+    if(state.notesSelectedId === Number(el.dataset.openNote)) return;
+    await saveCurrentNote(true);
+    state.notesSelectedId = Number(el.dataset.openNote);
+    render();
+  }));
+  document.getElementById('noteLinkBtn')?.addEventListener('click', ()=>openNoteLinkPicker(state.notesSelectedId));
+  document.querySelectorAll('[data-remove-note-link]').forEach(b=>b.addEventListener('click', async (e)=>{
+    e.stopPropagation();
+    await DB.delete('note_links', Number(b.dataset.removeNoteLink));
+    await refreshCache();
+    render();
+  }));
+  if(state.notesSelectedId){
+    const note = state.cache.notes.find(n=>n.id===state.notesSelectedId);
+    if(note) await initQuillEditor(note);
+    document.getElementById('noteTitleInput')?.addEventListener('input', ()=>{
+      clearTimeout(_noteSaveTimeout);
+      _noteSaveTimeout = setTimeout(()=>saveCurrentNote(false), 700);
+    });
+  }
 }
 
 /* ================= REPORTS ================= */
@@ -5242,6 +5500,8 @@ function mountSettings(){
       uniformIssues: await DB.getAll('uniform_issues'),
       ladders: await DB.getAll('ladders'),
       ladderInspections: await DB.getAll('ladder_inspections'),
+      notes: await DB.getAll('notes'),
+      noteLinks: await DB.getAll('note_links'),
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
@@ -5298,6 +5558,8 @@ function confirmResetAll(){
     await DB.clear('uniform_issues');
     await DB.clear('ladders');
     await DB.clear('ladder_inspections');
+    await DB.clear('notes');
+    await DB.clear('note_links');
     await seedIfEmpty();
     closeModal(); toast('All data reset');
     state.weekStart = mondayOf(new Date());
@@ -5390,6 +5652,9 @@ function initNav(){
     }
     else if(state.route==='schedule'){
       openEventForm({ date: toISO(state.boardMobileDate||new Date()) });
+    }
+    else if(state.route==='notes'){
+      createNewNote();
     }
     else openEventForm({ date: todayISO() });
   });

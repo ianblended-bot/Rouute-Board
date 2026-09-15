@@ -337,3 +337,21 @@ async function deleteTaskAttachment(path){
   const { error } = await sb.storage.from('task-attachments').remove([path]);
   if(error) throw error;
 }
+
+const ALLOWED_NOTE_IMAGE_TYPES = ['image/jpeg','image/png','image/gif','image/webp'];
+const MAX_NOTE_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
+async function uploadNoteImage(file){
+  if(!ALLOWED_NOTE_IMAGE_TYPES.includes(file.type)){
+    throw new Error(`"${file.name}" isn't a supported image type`);
+  }
+  if(file.size > MAX_NOTE_IMAGE_SIZE){
+    throw new Error(`"${file.name}" is over the 10MB limit`);
+  }
+  const session = (await sb.auth.getSession()).data.session;
+  const userId = session?.user?.id || 'unknown';
+  const path = `${userId}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
+  const { error } = await sb.storage.from('note-images').upload(path, file);
+  if(error) throw error;
+  const { data } = sb.storage.from('note-images').getPublicUrl(path);
+  return data.publicUrl;
+}
