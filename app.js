@@ -1700,8 +1700,8 @@ function renderSites(){
     const qa = siteQAStatus(s);
     const badge = qa ? (qa.state==='overdue'? `<span class="badge badge-overdue">${qa.label}</span>` : qa.state==='due' ? `<span class="badge badge-due">${qa.label}</span>` : qa.state==='scheduled' ? `<span class="badge badge-scheduled">${qa.label}</span>` : `<span class="badge badge-ok">${qa.label}</span>`) : `<span class="badge badge-neutral">No fixed schedule</span>`;
     return `<tr>
-      <td><div class="row-name">${escapeHTML(s.name)}</div>${s.isGeneral?`<div class="row-sub">Placeholder for unassigned QA visits</div>`:s.address?`<div class="row-sub">${escapeHTML(s.address)}</div>`:''}</td>
-      <td data-label="Zone">${regionBadge(s.region)}</td>
+      <td><div class="row-name">${escapeHTML(s.name)}${s.tier?` <span class="badge badge-neutral">${escapeHTML(s.tier)}</span>`:''}</div>${s.isGeneral?`<div class="row-sub">Placeholder for unassigned QA visits</div>`:s.address?`<div class="row-sub">${escapeHTML(s.address)}</div>`:''}</td>
+      <td data-label="Region">${regionBadge(s.region)}</td>
       <td data-label="Type"><span class="badge badge-neutral">${s.type==='qa'?'QA site':s.type==='tech'?'Tech site':'Other'}</span></td>
       <td data-label="QA status">${badge}</td>
       <td ${s.active?'':'data-label="Status"'}>${s.active? '' : '<span class="badge badge-neutral">Inactive</span>'}</td>
@@ -1725,7 +1725,7 @@ function renderSites(){
   </div>
   <div class="toolbar"><div class="chip-filter">${filters}</div></div>
   ${list.length ? `<div class="card table-wrap"><table class="responsive-table">
-    <thead><tr><th>Site</th><th>Zone</th><th>Type</th><th>QA status</th><th></th><th></th></tr></thead>
+    <thead><tr><th>Site</th><th>Region</th><th>Type</th><th>QA status</th><th></th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table></div>` : `<div class="card empty"><h3>No client sites yet</h3><p>You mentioned the site list is still to come — add sites here as and when, each with its own QA cadence, or use Bulk import to bring in a whole list at once.</p></div>`}
   `;
@@ -1757,6 +1757,31 @@ function normalizeSiteType(v){
   if(key.startsWith('other')) return 'other';
   return 'qa';
 }
+// Region codes like "GB-LEAST" don't correspond to anything by themselves —
+// they resolve to a real-world name first, which is then matched against
+// whatever zones you've actually got configured (by label or key, since zone
+// keys are generated once from the label and never renamed after that).
+const REGION_CODE_TO_NAME = {
+  'gb-least':'london east', 'gb-le':'london east',
+  'gb-seast':'london south east', 'gb-se':'london south east',
+  'gb-lsouth':'london south', 'gb-ls':'london south',
+  'gb-lwest':'london west', 'gb-lw':'london west',
+  'gb-lnorth':'london north', 'gb-ln':'london north',
+};
+function resolveRegionKeyFromText(v){
+  const raw = (v||'').toLowerCase().trim();
+  if(!raw) return null;
+  const zones = zoneList();
+  let z = zones.find(z=>z.label.toLowerCase()===raw || z.key.toLowerCase()===raw);
+  if(z) return z.key;
+  const aliasName = REGION_CODE_TO_NAME[raw];
+  if(aliasName){
+    z = zones.find(z=>z.label.toLowerCase().includes(aliasName));
+    if(z) return z.key;
+  }
+  z = zones.find(z=>z.label.toLowerCase().includes(raw) || (raw.length>2 && raw.includes(z.label.toLowerCase())));
+  return z ? z.key : null;
+}
 function parseCsvLine(line){
   const result = [];
   let cur = '', inQuotes = false;
@@ -1774,28 +1799,85 @@ function parseCsvLine(line){
   result.push(cur.trim());
   return result;
 }
-function parseBulkSites(raw){
+// A named header (e.g. exported from a spreadsheet with its own column
+// names) is detected and mapped by column NAME rather than position, so
+// column order and extra/missing columns don't matter. Falls back to the
+// simple fixed-position format when no recognised header is found.
+const HEADER_FIELD_ALIASES = {
+  name: ['name','site','site name','client','client site','client name'],
+  billingAccount: ['billing account','billing account ','billing name','account'],
+  address: ['address','postcode','post code','area','address / area'],
+  region: ['new region','region','zone'],
+  tier: ['tier','client tier'],
+  type: ['type','site type'],
+  qaFrequencyDays: ['qa cadence','qa frequency','cadence','qa cadence in days'],
+  notes: ['notes','note'],
+};
+function detectNamedHeaderMapping(headerCells){
+  const lower = headerCells.map(c=>c.toLowerCase().trim());
+  const mapping = {};
+  let matchedFields = 0;
+  for(const [field, aliases] of Object.entries(HEADER_FIELD_ALIASES)){
+    const idx = lower.findIndex(c=>aliases.includes(c));
+    if(idx !== -1){ mapping[field] = idx; matchedFields++; }
+  }
+  // Require at least a name column plus one other recognised column, so a
+  // plain "name, zone, type…" legacy paste (no real header) isn't mistaken
+  // for a named header just because its first cell happens to say "name".
+  if(mapping.name !== undefined && matchedFields >= 2) return mapping;
+  return null;
+}
+function parseBulkSites(raw, batchType){
   const existingNames = new Set(state.cache.sites.map(s=>s.name.toLowerCase().trim()));
   const lines = raw.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
   const rows = [];
   const seenThisImport = new Set();
-  for(const line of lines){
+  if(!lines.length) return rows;
+
+  const firstCells = parseCsvLine(lines[0]);
+  const headerMapping = detectNamedHeaderMapping(firstCells);
+  const dataLines = headerMapping ? lines.slice(1) : lines;
+
+  for(const line of dataLines){
     const cells = parseCsvLine(line);
-    const first = (cells[0]||'').toLowerCase();
-    if(rows.length===0 && ['name','site','site name','client site'].includes(first)) continue; // skip a header row
-    const name = (cells[0]||'').trim();
-    if(!name) continue;
-    const region = normalizeRegion(cells[1]);
-    const type = normalizeSiteType(cells[2]);
-    const freqRaw = (cells[3]||'').trim().toLowerCase();
-    const qaFrequencyDays = ['none','no','-','n/a'].includes(freqRaw) ? null : (freqRaw==='' ? 30 : (Number(freqRaw)||30));
-    const address = (cells[4]||'').trim();
-    const notes = (cells[5]||'').trim();
-    const key = name.toLowerCase();
+    let row;
+    if(headerMapping){
+      const get = (field)=> headerMapping[field]!==undefined ? (cells[headerMapping[field]]||'').trim() : '';
+      const name = get('name');
+      if(!name) continue;
+      const regionText = get('region');
+      const resolvedRegion = resolveRegionKeyFromText(regionText);
+      row = {
+        name,
+        region: resolvedRegion || 'floating',
+        regionUnresolved: !resolvedRegion && !!regionText,
+        type: get('type') ? normalizeSiteType(get('type')) : batchType,
+        qaFrequencyDays: get('qaFrequencyDays') ? (Number(get('qaFrequencyDays'))||30) : 30,
+        address: get('address'),
+        billingAccount: get('billingAccount'),
+        tier: get('tier'),
+        notes: get('notes'),
+      };
+    } else {
+      const first = (cells[0]||'').toLowerCase();
+      if(rows.length===0 && ['name','site','site name','client site'].includes(first)) continue; // skip a header row
+      const name = (cells[0]||'').trim();
+      if(!name) continue;
+      const region = normalizeRegion(cells[1]);
+      const type = normalizeSiteType(cells[2]);
+      const freqRaw = (cells[3]||'').trim().toLowerCase();
+      const qaFrequencyDays = ['none','no','-','n/a'].includes(freqRaw) ? null : (freqRaw==='' ? 30 : (Number(freqRaw)||30));
+      const address = (cells[4]||'').trim();
+      const notes = (cells[5]||'').trim();
+      row = { name, region, type, qaFrequencyDays, address, billingAccount:'', tier:'', notes };
+    }
+    const key = row.name.toLowerCase();
     const dupExisting = existingNames.has(key);
     const dupThisImport = seenThisImport.has(key);
     seenThisImport.add(key);
-    rows.push({ name, region, type, qaFrequencyDays, address, notes, skip: dupExisting || dupThisImport, reason: dupExisting ? 'Already exists' : dupThisImport ? 'Duplicate in list' : null });
+    row.skip = dupExisting || dupThisImport;
+    row.reason = dupExisting ? 'Already exists' : dupThisImport ? 'Duplicate in list' : null;
+    rows.push(row);
   }
   return rows;
 }
@@ -1805,8 +1887,17 @@ function openBulkImportSites(prefill){
       One site per line. A plain name works for a quick add — or use comma-separated columns for full detail:<br>
       <code style="font-size:11.5px;background:var(--paper-dim);padding:1px 5px;border-radius:4px;">name, zone, type, QA cadence in days, address, notes</code><br>
       Zone: east / west / outside / floating (defaults to Floating if blank or unrecognised) · Type: qa / tech / other (defaults to QA) ·
-      QA cadence defaults to 30 days if left blank — type "none" for no fixed schedule.
+      QA cadence defaults to 30 days if left blank — type "none" for no fixed schedule.<br><br>
+      Pasting a spreadsheet export with its own column headers (Client, Billing Account, Postcode, Region, Tier, etc.) also works — columns are matched by name, in any order.
     </p>
+    <div class="field">
+      <label>Default type for rows with no type column</label>
+      <select id="biDefaultType">
+        <option value="qa">QA site</option>
+        <option value="tech">Tech site</option>
+        <option value="other">Other</option>
+      </select>
+    </div>
     <div class="field">
       <label>Upload CSV or text file <span style="font-weight:400;text-transform:none;color:var(--text-faint);">(optional)</span></label>
       <input type="file" id="biFile" accept=".csv,.txt">
@@ -1828,17 +1919,20 @@ function openBulkImportSites(prefill){
   document.getElementById('biPreview').addEventListener('click', ()=>{
     const raw = document.getElementById('biText').value;
     if(!raw.trim()){ toast('Paste or upload something first'); return; }
-    renderBulkImportPreview(parseBulkSites(raw), raw);
+    const batchType = document.getElementById('biDefaultType').value;
+    renderBulkImportPreview(parseBulkSites(raw, batchType), raw);
   });
 }
 function renderBulkImportPreview(rows, raw){
   const importable = rows.filter(r=>!r.skip);
   const skipped = rows.filter(r=>r.skip);
+  const unresolvedRegionCount = rows.filter(r=>r.regionUnresolved).length;
   const tableRows = rows.map(r=>`
     <tr style="${r.skip?'opacity:.45;':''}">
-      <td><div class="row-name">${escapeHTML(r.name)}</div></td>
-      <td>${zoneByKey(r.region).label}</td>
+      <td><div class="row-name">${escapeHTML(r.name)}</div>${r.billingAccount?`<div class="row-sub">${escapeHTML(r.billingAccount)}</div>`:''}</td>
+      <td>${r.regionUnresolved?`<span class="badge badge-neutral" title="Couldn't match this to a zone">Unmatched</span>`:zoneByKey(r.region).label}</td>
       <td>${r.type==='qa'?'QA site':r.type==='tech'?'Tech site':'Other'}</td>
+      <td>${r.tier ? escapeHTML(r.tier) : '—'}</td>
       <td>${r.qaFrequencyDays==null?'No fixed schedule':r.qaFrequencyDays+' days'}</td>
       <td>${r.skip ? `<span class="badge badge-neutral">${r.reason}</span>` : `<span class="badge badge-ok">Will import</span>`}</td>
     </tr>
@@ -1846,11 +1940,12 @@ function renderBulkImportPreview(rows, raw){
   const body = `
     <p style="font-size:12.5px;color:var(--text-dim);margin-bottom:10px;">
       ${importable.length} site${importable.length===1?'':'s'} ready to import${skipped.length?` · ${skipped.length} skipped (already exist or repeated in your list)`:''}.
+      ${unresolvedRegionCount ? `<br>${unresolvedRegionCount} row${unresolvedRegionCount===1?'':'s'} had a region I couldn't match to one of your zones — they'll import under whichever zone sorts first, so worth fixing up afterwards.` : ''}
     </p>
     <div class="table-wrap" style="max-height:340px;overflow-y:auto;border:1px solid var(--line-soft);border-radius:8px;">
       <table>
-        <thead><tr><th>Name</th><th>Zone</th><th>Type</th><th>QA cadence</th><th></th></tr></thead>
-        <tbody>${tableRows || `<tr><td colspan="5" style="text-align:center;color:var(--text-faint);padding:24px;">Nothing parsed — check the formatting and try again.</td></tr>`}</tbody>
+        <thead><tr><th>Name</th><th>Zone</th><th>Type</th><th>Tier</th><th>QA cadence</th><th></th></tr></thead>
+        <tbody>${tableRows || `<tr><td colspan="6" style="text-align:center;color:var(--text-faint);padding:24px;">Nothing parsed — check the formatting and try again.</td></tr>`}</tbody>
       </table>
     </div>
   `;
@@ -1868,6 +1963,7 @@ function renderBulkImportPreview(rows, raw){
     for(const r of importable){
       await DB.add('sites', {
         name: r.name, region: r.region, type: r.type, address: r.address,
+        billingAccount: r.billingAccount||'', tier: r.tier||'',
         technicianId: null, qaFrequencyDays: r.qaFrequencyDays, notes: r.notes,
         active: true, createdAt: new Date().toISOString(),
       });
@@ -1879,14 +1975,16 @@ function renderBulkImportPreview(rows, raw){
 }
 function openSiteForm(editId){
   const existing = editId ? state.cache.sites.find(s=>s.id===editId) : null;
-  const v = existing || { name:'', region:'east', address:'', type:'qa', qaFrequencyDays:30, technicianId:'', notes:'', active:true };
+  const londonEastZone = zoneList().find(z=>z.label.toLowerCase().includes('london east'));
+  const defaultRegionKey = londonEastZone ? londonEastZone.key : (zoneList()[0]?.key || '');
+  const v = existing || { name:'', region:defaultRegionKey, address:'', type:'qa', qaFrequencyDays:30, technicianId:'', notes:'', active:true, billingAccount:'', tier:'' };
   const regionOptions = zoneList().map(z=>`<option value="${z.key}" ${v.region===z.key?'selected':''}>${z.label}</option>`).join('');
   const techOptions = state.cache.technicians.map(t=>`<option value="${t.id}" ${v.technicianId==t.id?'selected':''}>${escapeHTML(t.name)}</option>`).join('');
 
   const body = `
     <div class="field"><label>Site name</label><input id="sName" value="${escapeHTML(v.name)}" placeholder="e.g. LEK Consulting"></div>
     <div class="field-row">
-      <div class="field"><label>Zone</label><select id="sRegion">${regionOptions}</select></div>
+      <div class="field"><label>Region</label><select id="sRegion">${regionOptions}</select></div>
       <div class="field"><label>Type</label><select id="sType">
         <option value="qa" ${v.type==='qa'?'selected':''}>QA site</option>
         <option value="tech" ${v.type==='tech'?'selected':''}>Tech site</option>
@@ -1894,6 +1992,15 @@ function openSiteForm(editId){
       </select></div>
     </div>
     <div class="field"><label>Address / area</label><input id="sAddress" value="${escapeHTML(v.address)}"></div>
+    <div class="field-row">
+      <div class="field"><label>Billing account (optional)</label><input id="sBillingAccount" value="${escapeHTML(v.billingAccount||'')}" placeholder="e.g. Sodexo Ltd"></div>
+      <div class="field"><label>Tier (optional)</label><select id="sTier">
+        <option value="" ${!v.tier?'selected':''}>—</option>
+        <option value="T1" ${v.tier==='T1'?'selected':''}>T1</option>
+        <option value="T2" ${v.tier==='T2'?'selected':''}>T2</option>
+        <option value="T3" ${v.tier==='T3'?'selected':''}>T3</option>
+      </select></div>
+    </div>
     <div class="field"><label>Usual technician (optional)</label><select id="sTech"><option value="">—</option>${techOptions}</select></div>
     <div class="field">
       <label><input type="checkbox" id="sHasFreq" ${v.qaFrequencyDays?'checked':''} style="width:auto;"> Track a QA cadence for this site</label>
@@ -1920,6 +2027,8 @@ function openSiteForm(editId){
       region: document.getElementById('sRegion').value,
       type: document.getElementById('sType').value,
       address: document.getElementById('sAddress').value.trim(),
+      billingAccount: document.getElementById('sBillingAccount').value.trim(),
+      tier: document.getElementById('sTier').value,
       technicianId: techId? Number(techId): null,
       qaFrequencyDays: document.getElementById('sHasFreq').checked ? (Number(document.getElementById('sFreq').value)||30) : null,
       notes: document.getElementById('sNotes').value.trim(),
