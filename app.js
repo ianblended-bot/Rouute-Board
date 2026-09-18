@@ -2721,15 +2721,20 @@ function openNoteLinkPicker(noteId){
     document.querySelectorAll('[data-pick-link]').forEach(row=>row.addEventListener('click', async ()=>{
       const id = Number(row.dataset.pickLink);
       const already = existingLinks.find(l=> (activeTab==='todo'&&l.todoId===id) || (activeTab==='site'&&l.siteId===id) || (activeTab==='technician'&&l.technicianId===id));
-      if(already){
-        await DB.delete('note_links', already.id);
-        existingLinks.splice(existingLinks.indexOf(already), 1);
-      } else {
-        const payload = { noteId, todoId: activeTab==='todo'?id:null, siteId: activeTab==='site'?id:null, technicianId: activeTab==='technician'?id:null, createdAt: new Date().toISOString() };
-        const newId = await DB.add('note_links', payload);
-        existingLinks.push({ id:newId, ...payload });
+      try{
+        if(already){
+          await DB.delete('note_links', already.id);
+          existingLinks.splice(existingLinks.indexOf(already), 1);
+        } else {
+          const payload = { noteId, todoId: activeTab==='todo'?id:null, siteId: activeTab==='site'?id:null, technicianId: activeTab==='technician'?id:null, createdAt: new Date().toISOString() };
+          const newId = await DB.add('note_links', payload);
+          existingLinks.push({ id:newId, ...payload });
+        }
+        await refreshCache();
+      } catch(err){
+        toast(err?.message || 'Could not update that link — check the console for details');
+        console.error('note_links operation failed:', err);
       }
-      await refreshCache();
       document.getElementById('noteLinkOptions').innerHTML = optionsHTML(activeTab);
       wire();
     }));
