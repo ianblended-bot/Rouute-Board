@@ -2688,17 +2688,22 @@ function openNoteLinkPicker(noteId){
     const items = tab==='todo' ? state.cache.todos.filter(t=>!t.completed).map(t=>({id:t.id,label:t.text}))
       : tab==='site' ? state.cache.sites.filter(s=>s.active).map(s=>({id:s.id,label:s.name}))
       : state.cache.technicians.filter(t=>t.active).map(t=>({id:t.id,label:t.name}));
-    if(!items.length) return `<p style="font-size:12px;color:var(--text-faint);padding:10px 4px;">Nothing to link here yet.</p>`;
-    return items.map(it=>`
+    const newTaskRow = tab==='todo' ? `
+      <div style="display:flex;gap:6px;margin-bottom:10px;">
+        <input id="noteNewTaskText" placeholder="Create a new task, linked to this note…" style="flex:1;">
+        <button class="btn btn-small" id="noteNewTaskBtn">+ Add</button>
+      </div>` : '';
+    const list = items.length ? items.map(it=>`
       <div class="watch-row" data-pick-link="${it.id}" style="cursor:pointer;">
         <div class="watch-name">${escapeHTML(it.label)}</div>
         <div class="watch-spacer"></div>
         ${isLinked(tab, it.id) ? '<span class="badge badge-ok">Linked</span>' : ''}
-      </div>`).join('');
+      </div>`).join('') : `<p style="font-size:12px;color:var(--text-faint);padding:10px 4px;">Nothing to link here yet.</p>`;
+    return newTaskRow + list;
   }
   function renderBody(){
     return `
-      <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">A note can link to more than one thing — pick as many as make sense.</p>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">Link to something that already exists, or — on the To-Do tab — create a brand new task that's automatically linked back to this note.</p>
       <div class="chip-filter" style="margin-bottom:12px;" id="noteLinkTabs">
         <button class="chip ${activeTab==='todo'?'active':''}" data-link-tab="todo">To-Do</button>
         <button class="chip ${activeTab==='site'?'active':''}" data-link-tab="site">Sites</button>
@@ -2738,6 +2743,31 @@ function openNoteLinkPicker(noteId){
       document.getElementById('noteLinkOptions').innerHTML = optionsHTML(activeTab);
       wire();
     }));
+    document.getElementById('noteNewTaskBtn')?.addEventListener('click', async ()=>{
+      const textInput = document.getElementById('noteNewTaskText');
+      const text = textInput.value.trim();
+      if(!text){ toast('Enter what the task is first'); return; }
+      try{
+        const newTodoId = await DB.add('todos', {
+          text, list:'todo', listChangedAt: new Date().toISOString(), completed:false,
+          dueDate: todayISO(), alertAt:null, alertFired:false, priority:'medium',
+          followUpDate:null, followUpAction:'alert', followUpDone:false,
+          source:'note', sourceRef: String(noteId), createdAt: new Date().toISOString(),
+        });
+        const linkId = await DB.add('note_links', { noteId, todoId:newTodoId, siteId:null, technicianId:null, createdAt: new Date().toISOString() });
+        existingLinks.push({ id:linkId, noteId, todoId:newTodoId, siteId:null, technicianId:null });
+        await refreshCache();
+        toast('Task created and linked');
+      } catch(err){
+        toast(err?.message || 'Could not create that task — check the console for details');
+        console.error('create-task-from-note failed:', err);
+      }
+      document.getElementById('noteLinkOptions').innerHTML = optionsHTML(activeTab);
+      wire();
+    });
+    document.getElementById('noteNewTaskText')?.addEventListener('keydown', (e)=>{
+      if(e.key === 'Enter') document.getElementById('noteNewTaskBtn')?.click();
+    });
   }
   showModal('Link this note', renderBody(), `<span></span><div class="modal-foot-right"><button class="btn" id="noteLinkDone">Done</button></div>`);
   wire();
