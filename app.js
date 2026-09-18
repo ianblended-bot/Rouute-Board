@@ -423,7 +423,7 @@ function renderDashboard(){
   const todoRowsHTML = dueTodos.length ? dueTodos.slice(0,6).map(t=>`
     <div class="watch-row">
       <button class="et-check" data-toggle-todo="${t.id}" title="Mark done">✓</button>
-      <div><div class="watch-name">${escapeHTML(t.text)}</div><div class="watch-meta">${todoDueBadge(t)||''}${t.alertAt?' ⏰':''}</div></div>
+      <div><div class="watch-name">${escapeHTML(t.text)}</div><div class="watch-meta">${todoDueBadge(t)||''}${t.alertAt?' ⏰':''}${todoAttachmentPill(t)}${todoNotePill(t)}</div></div>
     </div>
   `).join('') + `<div style="padding:8px 12px 4px;"><button class="btn btn-outline btn-small" data-goto-todos="1">Open To-Do${dueTodos.length>6?` (${dueTodos.length})`:''}</button></div>`
     : `<div class="empty" style="padding:22px;"><p>Nothing due — <button class="icon-btn" data-goto-todos="1" style="display:inline;">open To-Do</button> to add a task.</p></div>`;
@@ -556,6 +556,16 @@ function mountDashboard(){
     if(!t) return;
     await DB.put('todos', { ...t, completed: !t.completed });
     render();
+  }));
+  document.querySelectorAll('[data-view-attachments]').forEach(b=>b.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    openTaskAttachmentsModal(Number(b.dataset.viewAttachments));
+  }));
+  document.querySelectorAll('[data-view-linked-notes]').forEach(b=>b.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    const id = Number(b.dataset.viewLinkedNotes);
+    const t = state.cache.todos.find(x=>x.id===id);
+    openLinkedNotesModal('todo', id, t?.text);
   }));
   document.querySelector('[data-goto-missed]')?.addEventListener('click', (e)=>{
     e.preventDefault();
