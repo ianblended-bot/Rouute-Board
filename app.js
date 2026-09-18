@@ -3092,6 +3092,28 @@ function todoAttachmentPill(t){
   if(!count) return '';
   return `<button class="attach-pill" data-view-attachments="${t.id}">📎 ${count}</button>`;
 }
+function todoNotePill(t){
+  const notes = notesForLinkedItem('todo', t.id);
+  if(!notes.length) return '';
+  return `<button class="attach-pill" data-view-linked-notes="${t.id}">📝 ${notes.length}</button>`;
+}
+function openLinkedNotesModal(kind, id, itemLabel){
+  const notes = notesForLinkedItem(kind, id);
+  if(!notes.length) return;
+  const rows = notes.map(n=>`
+    <div class="watch-row" data-open-linked-note="${n.id}" style="cursor:pointer;">
+      <div><div class="watch-name">${escapeHTML(n.title||'Untitled note')}</div><div class="watch-meta">${escapeHTML(noteSnippet(n.content, 50))} · ${humanDateShort(toISO(new Date(n.updatedAt)))}</div></div>
+      <div class="watch-spacer"></div>
+      <span style="color:var(--text-faint);">›</span>
+    </div>`).join('');
+  showModal(`Linked notes${itemLabel?` — ${escapeHTML(itemLabel)}`:''}`, `<div class="card" style="padding:2px 8px;box-shadow:none;border:1px solid var(--line-soft);">${rows}</div>`, `<span></span><div class="modal-foot-right"><button class="btn" id="linkedNotesClose">Close</button></div>`);
+  document.getElementById('linkedNotesClose').addEventListener('click', closeModal);
+  document.querySelectorAll('[data-open-linked-note]').forEach(row=>row.addEventListener('click', ()=>{
+    closeModal();
+    state.notesSelectedId = Number(row.dataset.openLinkedNote);
+    navigate('notes');
+  }));
+}
 function openTaskAttachmentsModal(id){
   const t = state.cache.todos.find(x=>x.id===id);
   if(!t || !(t.attachments||[]).length) return;
@@ -3144,7 +3166,7 @@ function renderTodosSmartList(tab){
         <button class="et-check ${t.completed?'is-done':''}" data-toggle-todo="${t.id}" title="${t.completed?'Mark not done':'Mark done'}" style="margin-top:2px;">✓</button>
         <div class="todo-body">
           <div class="todo-text">${escapeHTML(t.text)}</div>
-          <div class="todo-meta">${meta.sinceVerb} ${sinceISO ? humanDateShort(sinceISO) : ''}${todoAttachmentPill(t)}</div>
+          <div class="todo-meta">${meta.sinceVerb} ${sinceISO ? humanDateShort(sinceISO) : ''}${todoAttachmentPill(t)}${todoNotePill(t)}</div>
         </div>
         <button class="todo-kebab" data-todo-menu="${t.id}" aria-label="Task options">⋯</button>
       </div>
@@ -3198,7 +3220,7 @@ function renderTodos(){
       <button class="et-check ${t.completed?'is-done':''}" data-toggle-todo="${t.id}" title="${t.completed?'Mark not done':'Mark done'}">✓</button>
       <div class="todo-body">
         <div class="todo-text">${escapeHTML(t.text)}</div>
-        <div class="todo-meta">${todoPriorityBadge(t)}${mode!=='day' ? `${todoDueBadge(t)}${todoAlertBadge(t)}${todoSourceBadge(t)}` : (todoAlertBadge(t) || '')}${todoAttachmentPill(t)}</div>
+        <div class="todo-meta">${todoPriorityBadge(t)}${mode!=='day' ? `${todoDueBadge(t)}${todoAlertBadge(t)}${todoSourceBadge(t)}` : (todoAlertBadge(t) || '')}${todoAttachmentPill(t)}${todoNotePill(t)}</div>
       </div>
       <button class="todo-kebab" data-todo-menu="${t.id}" aria-label="Task options">⋯</button>
     </div>
@@ -3335,6 +3357,12 @@ function mountTodos(){
   document.querySelectorAll('[data-view-attachments]').forEach(b=>b.addEventListener('click', (e)=>{
     e.stopPropagation();
     openTaskAttachmentsModal(Number(b.dataset.viewAttachments));
+  }));
+  document.querySelectorAll('[data-view-linked-notes]').forEach(b=>b.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    const id = Number(b.dataset.viewLinkedNotes);
+    const t = state.cache.todos.find(x=>x.id===id);
+    openLinkedNotesModal('todo', id, t?.text);
   }));
   wireFollowUpActions();
   document.getElementById('todoDesktopAdd')?.addEventListener('click', ()=>openTodoForm());
