@@ -225,6 +225,7 @@ function weeklyKPI(weekStartDate){
 /* ---------------- generic helpers ---------------- */
 function techName(id){ const t = state.cache.technicians.find(x=>x.id===id); return t? t.name : null; }
 function siteName(id){ const s = state.cache.sites.find(x=>x.id===id); return s? s.name : null; }
+function siteExportName(id){ const s = state.cache.sites.find(x=>x.id===id); return s ? (s.shortName || s.name) : null; } // short name only applies to exports — everywhere else in the app still shows the full name
 function regionBadge(region){
   const z = zoneByKey(region);
   return `<span class="badge" style="background:color-mix(in srgb, ${z.color} 18%, white); color:${z.color};">${escapeHTML(z.label)}</span>`;
@@ -1419,31 +1420,36 @@ function loadScriptOnce(src){
   });
 }
 
-function buildExportRows(startISO, endISO, includeTypes, includeOutlook){
+function formatExportDate(iso, dateFormat){
+  if(dateFormat === 'combined') return `${DOW_SHORT[(fromISO(iso).getDay()+6)%7]}, ${fromISO(iso).getDate()} ${fromISO(iso).toLocaleString('en-GB',{month:'short'})}`;
+  return iso;
+}
+function buildExportRows(startISO, endISO, includeTypes, includeOutlook, includeColumns, dateFormat){
   const rbRows = state.cache.events
     .filter(e => e.date >= startISO && e.date <= endISO)
     .filter(e => !includeTypes || includeTypes.has(e.type))
     .map(e=>{
       const t = eventTypeByKey(e.type);
       const who = e.technicianId ? techName(e.technicianId) : '';
-      const where = e.siteId ? siteName(e.siteId) : '';
+      const where = e.siteId ? siteExportName(e.siteId) : '';
       const status = e.completed ? 'Done' : (e.date < todayISO() ? 'Missed' : 'Scheduled');
       return {
-        Date: e.date,
+        Date: formatExportDate(e.date, dateFormat),
         Day: DOW_SHORT[(fromISO(e.date).getDay()+6)%7],
-        Type: t.label,
+        Type: e.title || t.label, // a specific title (e.g. a recurring block labelled "Huddle") beats the generic type name when one's set
         Technician: who,
         Site: where,
         Time: e.time || '',
         Status: status,
         Notes: e.notes || '',
+        _date: e.date,
         _sortTime: e.time || '',
       };
     });
   const outlookRows = includeOutlook===false ? [] : (state.cache.outlookEvents||[])
     .filter(o => o.date >= startISO && o.date <= endISO)
     .map(o=>({
-      Date: o.date,
+      Date: formatExportDate(o.date, dateFormat),
       Day: DOW_SHORT[(fromISO(o.date).getDay()+6)%7],
       Type: 'Outlook',
       Technician: '',
@@ -1451,11 +1457,14 @@ function buildExportRows(startISO, endISO, includeTypes, includeOutlook){
       Time: o.allDay ? 'All day' : `${o.startTime||''}${o.endTime?`–${o.endTime}`:''}`,
       Status: '',
       Notes: o.title || '',
+      _date: o.date,
       _sortTime: o.allDay ? '' : (o.startTime||''),
     }));
+  const allCols = ['Date','Day','Type','Technician','Site','Time','Status','Notes'];
+  const cols = includeColumns ? allCols.filter(c=>includeColumns.has(c)) : allCols;
   return [...rbRows, ...outlookRows]
-    .sort((a,b)=> a.Date.localeCompare(b.Date) || a._sortTime.localeCompare(b._sortTime))
-    .map(({_sortTime, ...row}) => row);
+    .sort((a,b)=> a._date.localeCompare(b._date) || a._sortTime.localeCompare(b._sortTime))
+    .map(row => { const out = {}; cols.forEach(c=>{ out[c] = row[c]; }); return out; });
 }
 
 function downloadBlob(blob, filename){
@@ -1483,7 +1492,8 @@ async function exportXLSX(rows, filename){
   try{ await loadScriptOnce(EXPORT_LIBS.xlsx); }
   catch(e){ toast('Could not load the Excel export library — check your connection'); return; }
   const ws = XLSX.utils.json_to_sheet(rows);
-  ws['!cols'] = [{wch:11},{wch:5},{wch:12},{wch:20},{wch:20},{wch:7},{wch:10},{wch:44}];
+  const colWidths = { Date:11, Day:5, Type:12, Technician:20, Site:20, Time:7, Status:10, Notes:44 };
+  ws['!cols'] = Object.keys(rows[0]||{}).map(k => ({ wch: colWidths[k] || 16 }));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Schedule');
   XLSX.writeFile(wb, filename + '.xlsx');
@@ -1497,8 +1507,9 @@ async function exportPDF(rows, filename, startISO, endISO, opts){
   } catch(e){ toast('Could not load the PDF export library — check your connection'); return; }
   const title = opts?.title || 'Route Board — Schedule Export';
   const subtitle = opts?.subtitle || `${humanDate(startISO)} to ${humanDate(endISO)}`;
-  const headers = opts?.headers || ['Date','Day','Type','Technician','Site','Time','Status','Notes'];
-  const bodyRows = opts?.bodyRows || rows.map(r => [r.Date, r.Day, r.Type, r.Technician, r.Site, r.Time, r.Status, r.Notes]);
+  const dynamicHeaders = Object.keys(rows[0]||{});
+  const headers = opts?.headers || dynamicHeaders;
+  const bodyRows = opts?.bodyRows || rows.map(r => dynamicHeaders.map(h => r[h]));
   const doc = new jspdf.jsPDF({ orientation: opts?.orientation || 'landscape' });
   doc.setFontSize(14);
   doc.text(title, 14, 15);
@@ -1561,6 +1572,33 @@ function openExportModal(){
         <span style="font-size:13px;color:var(--ink);">Include synced Outlook events</span>
       </label>
     </div>
+    <div class="field">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+        <label style="margin:0;">Columns</label>
+        <button class="btn-link" id="exColSelectAll" style="padding:0;">Select all</button>
+      </div>
+      <label style="display:flex;align-items:center;gap:9px;padding:6px 2px;font-weight:400;text-transform:none;letter-spacing:normal;">
+        <input type="checkbox" class="ex-col-check" data-col="Date" checked style="width:auto;">
+        <span style="font-size:13px;color:var(--ink);">Date</span>
+      </label>
+      <div style="display:flex;gap:6px;margin-left:28px;margin-bottom:4px;">
+        <button class="chip" data-date-format="iso">21 Sept 2026</button>
+        <button class="chip active" data-date-format="combined">Mon, 21 Sept</button>
+      </div>
+      ${['Type','Technician','Site','Time'].map(c=>`
+        <label style="display:flex;align-items:center;gap:9px;padding:6px 2px;font-weight:400;text-transform:none;letter-spacing:normal;">
+          <input type="checkbox" class="ex-col-check" data-col="${c}" checked style="width:auto;">
+          <span style="font-size:13px;color:var(--ink);">${c}</span>
+        </label>`).join('')}
+      <label style="display:flex;align-items:center;gap:9px;padding:6px 2px;font-weight:400;text-transform:none;letter-spacing:normal;">
+        <input type="checkbox" class="ex-col-check" data-col="Status" style="width:auto;">
+        <span style="font-size:13px;color:var(--ink);">Status</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:9px;padding:6px 2px;font-weight:400;text-transform:none;letter-spacing:normal;">
+        <input type="checkbox" class="ex-col-check" data-col="Notes" checked style="width:auto;">
+        <span style="font-size:13px;color:var(--ink);">Notes</span>
+      </label>
+    </div>
   `;
   const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="exCancel">Cancel</button><button class="btn" id="exRun">Export</button></div>`;
   showModal('Export schedule', body, foot);
@@ -1575,6 +1613,17 @@ function openExportModal(){
     boxes.forEach(b=>{ b.checked = !allChecked; });
     document.getElementById('exSelectAll').textContent = allChecked ? 'Select all' : 'Deselect all';
   });
+  let dateFormat = 'combined';
+  document.querySelectorAll('[data-date-format]').forEach(chip=>chip.addEventListener('click', ()=>{
+    dateFormat = chip.dataset.dateFormat;
+    document.querySelectorAll('[data-date-format]').forEach(c=>c.classList.toggle('active', c.dataset.dateFormat===dateFormat));
+  }));
+  document.getElementById('exColSelectAll').addEventListener('click', ()=>{
+    const boxes = document.querySelectorAll('.ex-col-check');
+    const allChecked = Array.from(boxes).every(b=>b.checked);
+    boxes.forEach(b=>{ b.checked = !allChecked; });
+    document.getElementById('exColSelectAll').textContent = allChecked ? 'Select all' : 'Deselect all';
+  });
   document.getElementById('exRun').addEventListener('click', async ()=>{
     const range = document.getElementById('exRange').value;
     const format = document.getElementById('exFormat').value;
@@ -1588,7 +1637,10 @@ function openExportModal(){
     const includeOutlook = document.getElementById('exIncludeOutlook').checked;
     if(includeTypes.size===0 && !includeOutlook){ toast('Select at least one thing to include'); return; }
 
-    const rows = buildExportRows(startISO, endISO, includeTypes, includeOutlook);
+    const includeColumns = new Set(Array.from(document.querySelectorAll('.ex-col-check')).filter(b=>b.checked).map(b=>b.dataset.col));
+    if(includeColumns.size===0){ toast('Select at least one column'); return; }
+
+    const rows = buildExportRows(startISO, endISO, includeTypes, includeOutlook, includeColumns, dateFormat);
     if(rows.length === 0){ toast('Nothing matching those filters in that range'); return; }
 
     const runBtn = document.getElementById('exRun');
@@ -2031,12 +2083,15 @@ function openSiteForm(editId){
   const existing = editId ? state.cache.sites.find(s=>s.id===editId) : null;
   const londonEastZone = zoneList().find(z=>z.label.toLowerCase().includes('london east'));
   const defaultRegionKey = londonEastZone ? londonEastZone.key : (zoneList()[0]?.key || '');
-  const v = existing || { name:'', region:defaultRegionKey, address:'', type:'qa', qaFrequencyDays:30, technicianId:'', notes:'', active:true, billingAccount:'', tier:'' };
+  const v = existing || { name:'', region:defaultRegionKey, address:'', type:'qa', qaFrequencyDays:30, technicianId:'', notes:'', active:true, billingAccount:'', tier:'', shortName:'' };
   const regionOptions = zoneList().map(z=>`<option value="${z.key}" ${v.region===z.key?'selected':''}>${z.label}</option>`).join('');
   const techOptions = state.cache.technicians.map(t=>`<option value="${t.id}" ${v.technicianId==t.id?'selected':''}>${escapeHTML(t.name)}</option>`).join('');
 
   const body = `
     <div class="field"><label>Site name</label><input id="sName" value="${escapeHTML(v.name)}" placeholder="e.g. LEK Consulting"></div>
+    <div class="field"><label>Short name for exports <span style="font-weight:400;text-transform:none;color:var(--text-faint);">(optional)</span></label><input id="sShortName" value="${escapeHTML(v.shortName||'')}" placeholder="e.g. Standard Chartered Bank">
+      <div class="freq-hint">Used instead of the full site name on schedule exports. Leave blank to just use the full name.</div>
+    </div>
     <div class="field-row">
       <div class="field"><label>Region</label><select id="sRegion">${regionOptions}</select></div>
       <div class="field"><label>Type</label><select id="sType">
@@ -2082,6 +2137,7 @@ function openSiteForm(editId){
       type: document.getElementById('sType').value,
       address: document.getElementById('sAddress').value.trim(),
       billingAccount: document.getElementById('sBillingAccount').value.trim(),
+      shortName: document.getElementById('sShortName').value.trim(),
       tier: document.getElementById('sTier').value,
       technicianId: techId? Number(techId): null,
       qaFrequencyDays: document.getElementById('sHasFreq').checked ? (Number(document.getElementById('sFreq').value)||30) : null,
