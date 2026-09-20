@@ -1419,9 +1419,10 @@ function loadScriptOnce(src){
   });
 }
 
-function buildExportRows(startISO, endISO){
+function buildExportRows(startISO, endISO, includeTypes, includeOutlook){
   const rbRows = state.cache.events
     .filter(e => e.date >= startISO && e.date <= endISO)
+    .filter(e => !includeTypes || includeTypes.has(e.type))
     .map(e=>{
       const t = eventTypeByKey(e.type);
       const who = e.technicianId ? techName(e.technicianId) : '';
@@ -1439,7 +1440,7 @@ function buildExportRows(startISO, endISO){
         _sortTime: e.time || '',
       };
     });
-  const outlookRows = (state.cache.outlookEvents||[])
+  const outlookRows = includeOutlook===false ? [] : (state.cache.outlookEvents||[])
     .filter(o => o.date >= startISO && o.date <= endISO)
     .map(o=>({
       Date: o.date,
@@ -1522,6 +1523,7 @@ function openExportModal(){
   const now = new Date();
   const moStartISO = toISO(new Date(now.getFullYear(), now.getMonth(), 1));
   const moEndISO = toISO(new Date(now.getFullYear(), now.getMonth()+1, 0));
+  const types = eventTypeList();
 
   const body = `
     <div class="field"><label>Range</label>
@@ -1542,6 +1544,23 @@ function openExportModal(){
         <option value="pdf">PDF (.pdf)</option>
       </select>
     </div>
+    <div class="field">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+        <label style="margin:0;">Include</label>
+        <button class="btn-link" id="exSelectAll" style="padding:0;">Select all</button>
+      </div>
+      ${types.map(t=>`
+        <label style="display:flex;align-items:center;gap:9px;padding:6px 2px;font-weight:400;text-transform:none;letter-spacing:normal;">
+          <input type="checkbox" class="ex-type-check" data-type-key="${t.key}" checked style="width:auto;">
+          <span class="dot" style="background:${t.color};width:9px;height:9px;flex-shrink:0;"></span>
+          <span style="font-size:13px;color:var(--ink);">${escapeHTML(t.label)}</span>
+        </label>
+      `).join('')}
+      <label style="display:flex;align-items:center;gap:9px;padding:9px 2px 2px;border-top:1px solid var(--line-soft);margin-top:6px;font-weight:400;text-transform:none;letter-spacing:normal;">
+        <input type="checkbox" id="exIncludeOutlook" checked style="width:auto;">
+        <span style="font-size:13px;color:var(--ink);">Include synced Outlook events</span>
+      </label>
+    </div>
   `;
   const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="exCancel">Cancel</button><button class="btn" id="exRun">Export</button></div>`;
   showModal('Export schedule', body, foot);
@@ -1549,6 +1568,12 @@ function openExportModal(){
   document.getElementById('exCancel').addEventListener('click', closeModal);
   document.getElementById('exRange').addEventListener('change', (e)=>{
     document.getElementById('exCustomRange').style.display = e.target.value==='custom' ? 'flex' : 'none';
+  });
+  document.getElementById('exSelectAll').addEventListener('click', ()=>{
+    const boxes = document.querySelectorAll('.ex-type-check');
+    const allChecked = Array.from(boxes).every(b=>b.checked);
+    boxes.forEach(b=>{ b.checked = !allChecked; });
+    document.getElementById('exSelectAll').textContent = allChecked ? 'Select all' : 'Deselect all';
   });
   document.getElementById('exRun').addEventListener('click', async ()=>{
     const range = document.getElementById('exRange').value;
@@ -1559,8 +1584,12 @@ function openExportModal(){
     else { startISO = document.getElementById('exStart').value; endISO = document.getElementById('exEnd').value; }
     if(!startISO || !endISO || startISO > endISO){ toast('Pick a valid date range'); return; }
 
-    const rows = buildExportRows(startISO, endISO);
-    if(rows.length === 0){ toast('No visits logged in that range'); return; }
+    const includeTypes = new Set(Array.from(document.querySelectorAll('.ex-type-check')).filter(b=>b.checked).map(b=>b.dataset.typeKey));
+    const includeOutlook = document.getElementById('exIncludeOutlook').checked;
+    if(includeTypes.size===0 && !includeOutlook){ toast('Select at least one thing to include'); return; }
+
+    const rows = buildExportRows(startISO, endISO, includeTypes, includeOutlook);
+    if(rows.length === 0){ toast('Nothing matching those filters in that range'); return; }
 
     const runBtn = document.getElementById('exRun');
     runBtn.disabled = true;
@@ -3410,12 +3439,15 @@ function mountTodos(){
     openLinkedNotesModal('todo', id, t?.text);
   }));
   wireFollowUpActions();
-  document.getElementById('todoDesktopAdd')?.addEventListener('click', ()=>openTodoForm());
+  document.getElementById('todoDesktopAdd')?.addEventListener('click', ()=>{
+    const prefillDate = (state.todoListTab==='todo' && (state.todoViewMode||'day')==='day') ? toISO(state.todoViewDate||new Date()) : null;
+    openTodoForm(null, prefillDate);
+  });
   document.getElementById('todoDesktopSettings')?.addEventListener('click', ()=>openTodoSettingsModal());
 }
-function openTodoForm(editId){
+function openTodoForm(editId, prefillDate){
   const existing = editId ? state.cache.todos.find(t=>t.id===editId) : null;
-  const v = existing || { text:'', dueDate: todayISO(), alertAt:null, completed:false, priority:'medium', list:'todo', followUpDate:null, followUpAction:'alert' };
+  const v = existing || { text:'', dueDate: prefillDate || todayISO(), alertAt:null, completed:false, priority:'medium', list:'todo', followUpDate:null, followUpAction:'alert' };
   const alertLocal = v.alertAt ? new Date(v.alertAt) : null;
   const alertDateVal = alertLocal ? toISO(alertLocal) : '';
   const alertTimeVal = alertLocal ? `${String(alertLocal.getHours()).padStart(2,'0')}:${String(alertLocal.getMinutes()).padStart(2,'0')}` : '';
@@ -5705,7 +5737,10 @@ function initNav(){
   });
   document.getElementById('hamburger').addEventListener('click', ()=>document.getElementById('app').classList.toggle('nav-open'));
   document.getElementById('topbarAdd').addEventListener('click', ()=>{
-    if(state.route==='todos') openTodoForm();
+    if(state.route==='todos'){
+      const prefillDate = (state.todoListTab==='todo' && (state.todoViewMode||'day')==='day') ? toISO(state.todoViewDate||new Date()) : null;
+      openTodoForm(null, prefillDate);
+    }
     else if(state.route==='compose'){
       state.composeNotes = '';
       state.composeDraft = null;
