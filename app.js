@@ -3324,8 +3324,8 @@ function todoListTabsHTML(){
   const tab = state.todoListTab || 'todo';
   const showToday = tab === 'todo' && (state.todoViewMode||'day') === 'day';
   return `
-  <div class="chip-filter" style="margin-bottom:14px;flex-wrap:nowrap;">
-    ${Object.keys(LIST_META).map(k=>`<button class="chip ${tab===k?'active':''}" data-todo-tab="${k}" style="flex:1;text-align:center;white-space:nowrap;">${LIST_META[k].label}</button>`).join('')}
+  <div class="chip-filter todo-tabs-row" style="margin-bottom:14px;flex-wrap:nowrap;">
+    ${Object.keys(LIST_META).map(k=>`<button class="chip todo-tab-pill ${tab===k?'active':''}" data-todo-tab="${k}" style="text-align:center;white-space:nowrap;">${LIST_META[k].label}</button>`).join('')}
     ${showToday ? `<button class="chip" id="todoTodayBtn" style="flex:0 0 auto;color:var(--forest-dim);border-color:var(--forest-dim);">Today</button>` : ''}
   </div>`;
 }

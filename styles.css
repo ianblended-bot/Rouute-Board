@@ -337,6 +337,11 @@ tbody tr:hover{ background:var(--paper-dim); }
 .toolbar select{ max-width:180px; }
 .chip-filter{ display:flex; gap:6px; flex-wrap:wrap; }
 .chip{ padding:6px 12px; border-radius:99px; border:1px solid var(--line); background:#fff; font-size:12px; font-weight:600; color:var(--text-dim); }
+.todo-tab-pill{ flex:1; } /* mobile default: pills share the row evenly, same as before this change */
+@media (min-width:881px){
+  .todo-tabs-row{ justify-content:flex-start; } /* desktop: pills sit on the left rather than stretching across the page */
+  .todo-tab-pill{ flex:0 0 auto; padding-left:18px; padding-right:18px; }
+}
 .chip.active{ background:var(--ink); color:#fff; border-color:var(--ink); }
 
 /* ================= search ================= */
