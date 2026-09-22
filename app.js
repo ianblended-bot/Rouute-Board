@@ -2384,6 +2384,11 @@ function renderUniformTracker(){
   <div class="card" style="padding:4px 8px;max-width:560px;">${rows}</div>
   `;
 }
+function allIssuesForTechItem(techId, catalogItemId){
+  return state.cache.uniformIssues
+    .filter(i=>i.technicianId===techId && i.catalogItemId===catalogItemId)
+    .sort((a,b)=> b.issueDate.localeCompare(a.issueDate));
+}
 function renderUniformTrackerDetail(techId){
   const tech = state.cache.technicians.find(t=>t.id===techId);
   if(!tech){ state.uniformSelectedTechId = null; return renderUniformTracker(); }
@@ -2392,6 +2397,7 @@ function renderUniformTrackerDetail(techId){
     const { usedQty, lastIssued, nextAvailable } = uniformUsageForTech(techId, item.id);
     const pct = Math.min(100, Math.round((usedQty/Math.max(1,item.allowancePerAnnum))*100));
     const atLimit = usedQty >= item.allowancePerAnnum;
+    const historyCount = allIssuesForTechItem(techId, item.id).length;
     return `
     <div class="card" style="padding:12px 13px;margin-bottom:8px;">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
@@ -2404,6 +2410,7 @@ function renderUniformTrackerDetail(techId){
       <div style="display:flex;align-items:center;gap:10px;font-size:11px;color:var(--text-faint);">
         <span>${lastIssued ? `Last issued ${humanDateShort(lastIssued)}` : 'Never issued'}</span>
         ${atLimit && nextAvailable ? `<span>· Next available ${humanDateShort(nextAvailable)}</span>` : ''}
+        ${historyCount ? `<button class="btn-link" data-view-uniform-history="${item.id}" style="padding:0;text-decoration:underline;">View history (${historyCount})</button>` : ''}
         <span style="margin-left:auto;"></span>
         <button class="icon-btn" data-log-uniform-item="${item.id}">+ Log</button>
       </div>
@@ -2420,28 +2427,71 @@ function renderUniformTrackerDetail(techId){
   <div style="max-width:560px;">${rows}</div>
   `;
 }
-function openLogUniformIssueModal(techId, catalogItemId){
+function openUniformIssueHistoryModal(techId, catalogItemId){
+  const item = state.cache.uniformCatalog.find(c=>c.id===catalogItemId);
+  const tech = state.cache.technicians.find(t=>t.id===techId);
+  if(!item) return;
+  const issues = allIssuesForTechItem(techId, catalogItemId);
+  const rows = issues.length ? issues.map(i=>`
+    <div class="watch-row">
+      <div><div class="watch-name">${humanDateShort(i.issueDate)}</div><div class="watch-meta">Qty ${i.quantity||1}${i.notes?` · ${escapeHTML(i.notes)}`:''}</div></div>
+      <div class="watch-spacer"></div>
+      <button class="icon-btn" data-edit-uniform-issue="${i.id}">Edit</button>
+      <button class="icon-btn" data-del-uniform-issue="${i.id}">Delete</button>
+    </div>`).join('') : `<p style="font-size:12px;color:var(--text-faint);padding:12px;">No entries yet.</p>`;
+  showModal(`${escapeHTML(item.itemName)} — history`, `<p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">${escapeHTML(tech?.name||'')}</p><div class="card" style="padding:2px 8px;box-shadow:none;border:1px solid var(--line-soft);">${rows}</div>`, `<span></span><div class="modal-foot-right"><button class="btn" id="uniformHistoryClose">Close</button></div>`);
+  document.getElementById('uniformHistoryClose').addEventListener('click', closeModal);
+  document.querySelectorAll('[data-edit-uniform-issue]').forEach(b=>b.addEventListener('click', ()=>{
+    openLogUniformIssueModal(techId, catalogItemId, Number(b.dataset.editUniformIssue));
+  }));
+  document.querySelectorAll('[data-del-uniform-issue]').forEach(b=>b.addEventListener('click', async ()=>{
+    if(b.textContent==='Delete'){ b.textContent = 'Confirm?'; b.style.color = '#96331F'; b.style.borderColor = '#96331F'; return; }
+    await DB.delete('uniform_issues', Number(b.dataset.delUniformIssue));
+    await refreshCache();
+    toast('Entry deleted');
+    closeModal();
+    openUniformIssueHistoryModal(techId, catalogItemId);
+    render();
+  }));
+}
+function openLogUniformIssueModal(techId, catalogItemId, editId){
   const item = state.cache.uniformCatalog.find(c=>c.id===catalogItemId);
   if(!item) return;
+  const existing = editId ? state.cache.uniformIssues.find(i=>i.id===editId) : null;
+  const v = existing || { quantity:1, issueDate: todayISO(), notes:'' };
   const body = `
     <p style="font-size:13px;font-weight:600;color:var(--ink);margin-bottom:14px;">${escapeHTML(item.itemName)}</p>
     <div class="field-row">
-      <div class="field"><label>Quantity</label><input type="number" id="uiQty" value="1" min="1"></div>
-      <div class="field"><label>Date issued</label><input type="date" id="uiDate" value="${todayISO()}"></div>
+      <div class="field"><label>Quantity</label><input type="number" id="uiQty" value="${v.quantity||1}" min="1"></div>
+      <div class="field"><label>Date issued</label><input type="date" id="uiDate" value="${v.issueDate}"></div>
     </div>
-    <div class="field"><label>Notes (optional)</label><input id="uiNotes" placeholder="e.g. Size L"></div>
+    <div class="field"><label>Notes (optional)</label><input id="uiNotes" value="${escapeHTML(v.notes||'')}" placeholder="e.g. Size L"></div>
   `;
-  const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="uiCancel">Cancel</button><button class="btn" id="uiSave">Log issue</button></div>`;
-  showModal('Log a uniform issue', body, foot);
+  const foot = `
+    ${existing ? `<button class="btn btn-danger" id="uiDelete">Delete</button>` : `<span></span>`}
+    <div class="modal-foot-right"><button class="btn btn-outline" id="uiCancel">Cancel</button><button class="btn" id="uiSave">${existing?'Save changes':'Log issue'}</button></div>
+  `;
+  showModal(existing ? 'Edit this entry' : 'Log a uniform issue', body, foot);
   document.getElementById('uiCancel').addEventListener('click', closeModal);
+  document.getElementById('uiDelete')?.addEventListener('click', async ()=>{
+    await DB.delete('uniform_issues', editId);
+    await refreshCache();
+    closeModal();
+    toast('Entry deleted');
+    render();
+  });
   document.getElementById('uiSave').addEventListener('click', async ()=>{
     const quantity = Math.max(1, Number(document.getElementById('uiQty').value) || 1);
     const issueDate = document.getElementById('uiDate').value || todayISO();
     const notes = document.getElementById('uiNotes').value.trim();
-    await DB.add('uniform_issues', { technicianId: techId, catalogItemId, quantity, issueDate, notes, createdAt: new Date().toISOString() });
+    if(existing){
+      await DB.put('uniform_issues', { ...existing, quantity, issueDate, notes });
+    } else {
+      await DB.add('uniform_issues', { technicianId: techId, catalogItemId, quantity, issueDate, notes, createdAt: new Date().toISOString() });
+    }
     await refreshCache();
     closeModal();
-    toast('Issue logged');
+    toast(existing ? 'Entry updated' : 'Issue logged');
     render();
   });
 }
@@ -2456,6 +2506,9 @@ function mountUniformTracker(){
   });
   document.querySelectorAll('[data-log-uniform-item]').forEach(b=>b.addEventListener('click', ()=>{
     openLogUniformIssueModal(state.uniformSelectedTechId, Number(b.dataset.logUniformItem));
+  }));
+  document.querySelectorAll('[data-view-uniform-history]').forEach(b=>b.addEventListener('click', ()=>{
+    openUniformIssueHistoryModal(state.uniformSelectedTechId, Number(b.dataset.viewUniformHistory));
   }));
 }
 
@@ -3269,9 +3322,11 @@ function openTaskAttachmentsModal(id){
 }
 function todoListTabsHTML(){
   const tab = state.todoListTab || 'todo';
+  const showToday = tab === 'todo' && (state.todoViewMode||'day') === 'day';
   return `
-  <div class="chip-filter" style="margin-bottom:14px;">
-    ${Object.keys(LIST_META).map(k=>`<button class="chip ${tab===k?'active':''}" data-todo-tab="${k}">${LIST_META[k].label}</button>`).join('')}
+  <div class="chip-filter" style="margin-bottom:14px;flex-wrap:nowrap;">
+    ${Object.keys(LIST_META).map(k=>`<button class="chip ${tab===k?'active':''}" data-todo-tab="${k}" style="flex:1;text-align:center;white-space:nowrap;">${LIST_META[k].label}</button>`).join('')}
+    ${showToday ? `<button class="chip" id="todoTodayBtn" style="flex:0 0 auto;color:var(--forest-dim);border-color:var(--forest-dim);">Today</button>` : ''}
   </div>`;
 }
 function todoFollowUpStrip(t){
@@ -3466,6 +3521,7 @@ function wireFollowUpActions(){
 function mountTodos(){
   document.getElementById('todoDayPrev')?.addEventListener('click', ()=>{ state.todoViewDate = addDays(state.todoViewDate||new Date(), -1); render(); });
   document.getElementById('todoDayNext')?.addEventListener('click', ()=>{ state.todoViewDate = addDays(state.todoViewDate||new Date(), 1); render(); });
+  document.getElementById('todoTodayBtn')?.addEventListener('click', ()=>{ state.todoViewDate = new Date(); render(); });
   document.getElementById('todoDayRollover')?.addEventListener('click', async ()=>{
     const viewISO = toISO(state.todoViewDate||new Date());
     const dayIds = state.cache.todos.filter(t=>!t.completed && t.dueDate===viewISO).map(t=>t.id);
