@@ -95,6 +95,7 @@ const state = {
   ladderSelectedTechId: null, // null = tracker shows the technician list
   notesSelectedId: null, // null = notes shows the list only (mobile) / nothing selected (desktop)
   notesSearchQuery: '',
+  notesShowArchived: false, // false = active notes list, true = archived notes list
   todoViewDate: new Date(),
   cache: { technicians:[], sites:[], events:[], settings:null, recurringBlocks:[], huddleAttendance:[], fleetcheckRecords:[], todos:[], zones:[], eventTypes:[], emailVoiceSamples:[], emailDrafts:[], contentAnalyses:[], problemSessions:[], outlookEvents:[], outlookTypeRules:[], uniformCatalog:[], uniformIssues:[], ladders:[], ladderInspections:[], notes:[], noteLinks:[] },
 };
@@ -2748,11 +2749,20 @@ function notesForLinkedItem(kind, id){
 function renderNotes(){
   return isMobileViewport() ? renderNotesMobile() : renderNotesDesktop();
 }
+function notesViewToggleHTML(){
+  const archivedCount = state.cache.notes.filter(n=>n.archived).length;
+  const showing = !!state.notesShowArchived;
+  return `<div class="chip-filter notes-view-toggle" style="margin-bottom:10px;">
+    <button class="chip ${!showing?'active':''}" data-notes-view="active">Notes</button>
+    <button class="chip ${showing?'active':''}" data-notes-view="archived">Archived${archivedCount?` (${archivedCount})`:''}</button>
+  </div>`;
+}
 function notesListItemsHTML(){
   const q = (state.notesSearchQuery||'').toLowerCase().trim();
-  let list = state.cache.notes;
+  const wantArchived = !!state.notesShowArchived;
+  let list = state.cache.notes.filter(n => !!n.archived === wantArchived);
   if(q) list = list.filter(n=> n.title.toLowerCase().includes(q) || (n.content||'').toLowerCase().includes(q));
-  if(!list.length) return `<p style="font-size:12px;color:var(--text-faint);padding:14px;">No notes yet.</p>`;
+  if(!list.length) return `<p style="font-size:12px;color:var(--text-faint);padding:14px;">${q ? 'No matching notes.' : (wantArchived ? 'No archived notes.' : 'No notes yet.')}</p>`;
   return list.map(n=>{
     const links = noteLinksForNote(n.id);
     return `
@@ -2767,7 +2777,11 @@ function noteEditorHeaderHTML(note){
   const links = noteLinksForNote(note.id);
   const linkChips = links.map(l=>`<span class="note-link-chip">${l.icon} ${escapeHTML(l.label)} <button data-remove-note-link="${l.id}">✕</button></span>`).join('');
   return `
-    <div class="note-links-row">${linkChips}<button class="icon-btn" id="noteLinkBtn">🔗 Link</button></div>
+    <div class="note-links-row">${linkChips}<button class="icon-btn" id="noteLinkBtn">🔗 Link</button>
+      <span class="note-actions">
+        <button class="icon-btn" id="noteArchiveBtn">${note.archived ? 'Unarchive' : 'Archive'}</button>
+        <button class="icon-btn" id="noteDeleteBtn">Delete</button>
+      </span></div>
     <input class="note-title-input" id="noteTitleInput" value="${escapeHTML(note.title)}" placeholder="Untitled note">
     <div class="note-ts">Created ${humanDateShort(toISO(new Date(note.createdAt)))} · Edited ${humanDateShort(toISO(new Date(note.updatedAt)))}, ${new Date(note.updatedAt).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}</div>
   `;
@@ -2780,6 +2794,7 @@ function renderNotesDesktop(){
     <div class="notes-sidebar">
       <button class="btn" id="newNoteBtn" style="width:100%;justify-content:center;margin-bottom:10px;">+ New note</button>
       <input class="notes-search" id="notesSearchInput" placeholder="🔍 Search notes…" value="${escapeHTML(state.notesSearchQuery||'')}">
+      ${notesViewToggleHTML()}
       <div class="notes-list-scroll">${notesListItemsHTML()}</div>
     </div>
     <div class="notes-editor">
@@ -2808,6 +2823,7 @@ function renderNotesMobile(){
   return `
   <div class="view-head"><div><h1>Notes</h1></div></div>
   <input class="notes-search" id="notesSearchInput" placeholder="🔍 Search notes…" value="${escapeHTML(state.notesSearchQuery||'')}" style="margin-bottom:10px;">
+  ${notesViewToggleHTML()}
   <div class="notes-list-mobile">${notesListItemsHTML()}</div>
   <button class="btn" id="newNoteBtn" style="width:100%;justify-content:center;margin-top:12px;">+ New note</button>
   `;
@@ -2816,6 +2832,7 @@ async function createNewNote(){
   const id = await DB.add('notes', { title:'Untitled note', content:'', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
   await refreshCache();
   state.notesSelectedId = id;
+  state.notesShowArchived = false; // a brand new note belongs in the active list
   render();
 }
 function openNoteLinkPicker(noteId){
@@ -2938,6 +2955,8 @@ async function saveCurrentNote(immediate){
   const title = (titleEl?.value || '').trim() || 'Untitled note';
   const content = _quillInstance.root.innerHTML;
   const existing = state.cache.notes.find(n=>n.id===state.notesSelectedId);
+  if(!existing) return; // note was deleted while an autosave was pending — saving now would insert a ghost copy
+  if(existing.title === title && (existing.content||'') === content) return; // nothing actually changed — merely viewing a note must not mark it as edited or reorder the list
   await DB.put('notes', { ...existing, title, content, updatedAt: new Date().toISOString() });
   await refreshCache();
   // light DOM touch-up so the sidebar reflects the latest edit without a full
@@ -2969,6 +2988,69 @@ function handleNoteImageInsert(){
   };
   input.click();
 }
+async function toggleArchiveCurrentNote(){
+  const id = state.notesSelectedId;
+  if(!id) return;
+  try{
+    clearTimeout(_noteSaveTimeout);
+    await saveCurrentNote(true); // flush anything typed in the last moment first
+    const note = state.cache.notes.find(n=>n.id===id);
+    if(!note) return;
+    const nowArchived = !note.archived;
+    await DB.put('notes', { ...note, archived: nowArchived }); // updatedAt untouched, so unarchiving restores its original place in the list
+    await refreshCache();
+    state.notesSelectedId = null;
+    toast(nowArchived ? 'Note archived — find it under Archived' : 'Note restored');
+    render();
+  } catch(err){
+    toast(err?.message || 'Could not update that note — has the latest migration been run?');
+    console.error('archive toggle failed:', err);
+  }
+}
+function noteImagePaths(html){
+  // pull storage paths for any images embedded in a note, so they can be cleaned up with it
+  const paths = [];
+  const re = /<img[^>]+src=["']([^"']+)["']/gi;
+  let m;
+  while((m = re.exec(html||''))){
+    const idx = m[1].indexOf('/note-images/');
+    if(idx !== -1) paths.push(decodeURIComponent(m[1].slice(idx + '/note-images/'.length).split('?')[0]));
+  }
+  return paths;
+}
+function openDeleteNoteConfirm(noteId){
+  const note = state.cache.notes.find(n=>n.id===noteId);
+  if(!note) return;
+  const linkCount = noteLinksForNote(noteId).length;
+  const imageCount = noteImagePaths(note.content).length;
+  const body = `
+    <p style="font-size:13px;line-height:1.6;color:var(--ink);margin-bottom:8px;"><strong>${escapeHTML(note.title||'Untitled note')}</strong> will be permanently deleted${imageCount?`, along with its ${imageCount} image${imageCount===1?'':'s'}`:''}. This can't be undone.</p>
+    <p style="font-size:12px;line-height:1.6;color:var(--text-dim);">${linkCount ? `Its ${linkCount} link${linkCount===1?'':'s'} will be removed, but the linked items themselves (tasks, sites, technicians) are not affected. ` : ''}Tasks you created from this note stay on your To-Do list.</p>
+    ${note.archived ? '' : '<p style="font-size:12px;color:var(--text-dim);margin-top:8px;">Not sure? <button class="btn-link" id="noteDelArchive" style="display:inline;width:auto;margin:0;padding:0;font-size:12px;text-align:inherit;text-decoration:underline;">Archive it instead</button> — it keeps the note, just out of the way.</p>'}`;
+  const foot = `<span></span><div class="modal-foot-right"><button class="btn btn-outline" id="noteDelCancel">Cancel</button><button class="btn btn-danger" id="noteDelConfirm">Delete permanently</button></div>`;
+  showModal('Delete this note?', body, foot);
+  document.getElementById('noteDelCancel').addEventListener('click', closeModal);
+  document.getElementById('noteDelArchive')?.addEventListener('click', ()=>{ closeModal(); toggleArchiveCurrentNote(); });
+  document.getElementById('noteDelConfirm').addEventListener('click', async ()=>{
+    const btn = document.getElementById('noteDelConfirm');
+    btn.disabled = true;
+    try{
+      clearTimeout(_noteSaveTimeout);      // stop any pending autosave from firing at a note that's about to disappear
+      state.notesSelectedId = null;
+      const paths = noteImagePaths(note.content);
+      if(paths.length){ try{ await deleteNoteImages(paths); } catch(e){ console.warn('Image cleanup failed (note will still be deleted):', e); } }
+      await DB.delete('notes', noteId);    // note_links rows go with it via ON DELETE CASCADE
+      await refreshCache();
+      closeModal();
+      toast('Note deleted');
+      render();
+    } catch(err){
+      btn.disabled = false;
+      toast(err?.message || 'Could not delete that note');
+      console.error('delete note failed:', err);
+    }
+  });
+}
 async function mountNotes(){
   document.getElementById('newNoteBtn')?.addEventListener('click', createNewNote);
   document.getElementById('notesBackBtn')?.addEventListener('click', async ()=>{
@@ -2992,6 +3074,16 @@ async function mountNotes(){
     render();
   }));
   document.getElementById('noteLinkBtn')?.addEventListener('click', ()=>openNoteLinkPicker(state.notesSelectedId));
+  document.querySelectorAll('[data-notes-view]').forEach(b=>b.addEventListener('click', async ()=>{
+    const showArchived = b.dataset.notesView === 'archived';
+    if(showArchived === !!state.notesShowArchived) return;
+    await saveCurrentNote(true);
+    state.notesShowArchived = showArchived;
+    state.notesSelectedId = null; // whatever was open belongs to the other list
+    render();
+  }));
+  document.getElementById('noteArchiveBtn')?.addEventListener('click', toggleArchiveCurrentNote);
+  document.getElementById('noteDeleteBtn')?.addEventListener('click', ()=>openDeleteNoteConfirm(state.notesSelectedId));
   document.querySelectorAll('[data-remove-note-link]').forEach(b=>b.addEventListener('click', async (e)=>{
     e.stopPropagation();
     await DB.delete('note_links', Number(b.dataset.removeNoteLink));
@@ -3285,7 +3377,7 @@ function openLinkedNotesModal(kind, id, itemLabel){
   if(!notes.length) return;
   const rows = notes.map(n=>`
     <div class="watch-row" data-open-linked-note="${n.id}" style="cursor:pointer;">
-      <div><div class="watch-name">${escapeHTML(n.title||'Untitled note')}</div><div class="watch-meta">${escapeHTML(noteSnippet(n.content, 50))} · ${humanDateShort(toISO(new Date(n.updatedAt)))}</div></div>
+      <div><div class="watch-name">${escapeHTML(n.title||'Untitled note')}${n.archived?' <span class="badge badge-neutral">Archived</span>':''}</div><div class="watch-meta">${escapeHTML(noteSnippet(n.content, 50))} · ${humanDateShort(toISO(new Date(n.updatedAt)))}</div></div>
       <div class="watch-spacer"></div>
       <span style="color:var(--text-faint);">›</span>
     </div>`).join('');
@@ -3293,7 +3385,9 @@ function openLinkedNotesModal(kind, id, itemLabel){
   document.getElementById('linkedNotesClose').addEventListener('click', closeModal);
   document.querySelectorAll('[data-open-linked-note]').forEach(row=>row.addEventListener('click', ()=>{
     closeModal();
+    const target = state.cache.notes.find(n=>n.id===Number(row.dataset.openLinkedNote));
     state.notesSelectedId = Number(row.dataset.openLinkedNote);
+    state.notesShowArchived = !!target?.archived; // open straight into the right list so the note is visible
     navigate('notes');
   }));
 }

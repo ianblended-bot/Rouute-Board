@@ -338,6 +338,12 @@ async function deleteTaskAttachment(path){
   if(error) throw error;
 }
 
+async function deleteNoteImages(paths){
+  if(!paths || !paths.length) return;
+  const { error } = await sb.storage.from('note-images').remove(paths);
+  if(error) throw error;
+}
+
 const ALLOWED_NOTE_IMAGE_TYPES = ['image/jpeg','image/png','image/gif','image/webp'];
 const MAX_NOTE_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
 async function uploadNoteImage(file){
