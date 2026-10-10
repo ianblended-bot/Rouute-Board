@@ -88,7 +88,8 @@ const state = {
   psActionPlan: null, // { items:[string], addedFlags:[] }
   psLoading: false,
   settingsExpanded: {}, // { [sectionId]: true } means expanded; absent/false = collapsed (the default)
-  reportsExpanded: {},
+  reportsExpanded: { sitevisits:true },
+  reportsSiteTypes: ['qaVisit'], // visit types counted by the Site visits report
   boardMobileDate: new Date(), // which single day the mobile Weekly Board is showing
   todoListTab: 'todo', // 'todo' | 'ongoing' | 'awaiting_reply'
   uniformSelectedTechId: null, // null = tracker shows the technician list
@@ -202,6 +203,28 @@ function siteQAStatus(site){
   const last = lastEventFor(state.cache.events, e => e.type==='qaVisit' && e.siteId===site.id);
   const next = nextEventFor(state.cache.events, e => e.type==='qaVisit' && e.siteId===site.id);
   return statusFor(last?.date, site.qaFrequencyDays, site.createdAt, next?.date);
+}
+
+/* ---------------- return-visit cadence (months <-> days) ----------------
+   Stored as days in qaFrequencyDays (no schema change). Months are 30 days each,
+   except 12 months = 365, so legacy values of 30/60/90/120/180 map exactly. */
+const CADENCE_MONTH_OPTIONS = [1,2,3,4,6,9,12];
+function monthsToDays(m){ return m===12 ? 365 : m*30; }
+function daysToCadenceMonths(days){
+  if(!days) return null;
+  return CADENCE_MONTH_OPTIONS.find(m=>monthsToDays(m)===Number(days)) || null;
+}
+function cadenceLabel(days){
+  if(!days) return 'No schedule';
+  const m = daysToCadenceMonths(days);
+  if(m) return m===1 ? 'Every month' : `Every ${m} months`;
+  return `Every ${days} days`;
+}
+function cadenceSelectOptions(days){
+  const m = daysToCadenceMonths(days);
+  const opts = CADENCE_MONTH_OPTIONS.map(n=>`<option value="${monthsToDays(n)}" ${m===n?'selected':''}>${n===1?'1 month':n+' months'}</option>`);
+  if(days && !m) opts.push(`<option value="${days}" selected>${days} days</option>`);
+  return `<option value="" ${days?'':'selected'}>No schedule</option>` + opts.join('');
 }
 
 function weekEvents(weekStartDate){
@@ -1810,7 +1833,7 @@ function renderSites(){
       <td><div class="row-name">${escapeHTML(s.name)}${s.tier?` <span class="badge badge-neutral">${escapeHTML(s.tier)}</span>`:''}</div>${s.isGeneral?`<div class="row-sub">Placeholder for unassigned QA visits</div>`:s.address?`<div class="row-sub">${escapeHTML(s.address)}</div>`:''}</td>
       <td data-label="Region">${regionBadge(s.region)}</td>
       <td data-label="Type"><span class="badge badge-neutral">${s.type==='qa'?'QA site':s.type==='tech'?'Tech site':'Other'}</span></td>
-      <td data-label="QA status">${badge}</td>
+      <td data-label="QA status">${badge}${s.qaFrequencyDays?`<div class="row-sub">${cadenceLabel(s.qaFrequencyDays)}</div>`:''}</td>
       <td ${s.active?'':'data-label="Status"'}>${s.active? '' : '<span class="badge badge-neutral">Inactive</span>'}</td>
       <td><div class="row-actions">
         <button class="icon-btn" data-edit-site="${s.id}">Edit</button>
@@ -2113,9 +2136,10 @@ function openSiteForm(editId){
     </div>
     <div class="field"><label>Usual technician (optional)</label><select id="sTech"><option value="">—</option>${techOptions}</select></div>
     <div class="field">
-      <label><input type="checkbox" id="sHasFreq" ${v.qaFrequencyDays?'checked':''} style="width:auto;"> Track a QA cadence for this site</label>
-      <input type="number" id="sFreq" value="${v.qaFrequencyDays||30}" min="7" style="margin-top:8px;" ${v.qaFrequencyDays?'':'disabled'}>
-      <div class="freq-hint">Days between QA visits — used to flag when this site is due or overdue.</div>
+      <label>Return visit needed every</label>
+      <select id="sFreqSel">${cadenceSelectOptions(v.qaFrequencyDays)}<option value="custom">Custom (days)…</option></select>
+      <input type="number" id="sFreq" value="${v.qaFrequencyDays&&!daysToCadenceMonths(v.qaFrequencyDays)?v.qaFrequencyDays:''}" min="1" placeholder="Number of days" style="margin-top:8px;display:none;">
+      <div class="freq-hint">How long before this site needs another visit — used to flag when it is due or overdue. Choose "No schedule" to stop tracking.</div>
     </div>
     <div class="field"><label>Notes</label><textarea id="sNotes">${escapeHTML(v.notes||'')}</textarea></div>
     <div class="field"><label><input type="checkbox" id="sActive" ${v.active?'checked':''} style="width:auto;"> Active</label></div>
@@ -2125,7 +2149,11 @@ function openSiteForm(editId){
     <div class="modal-foot-right"><button class="btn btn-outline" id="sCancel">Cancel</button><button class="btn" id="sSave">${existing?'Save':'Add'}</button></div>
   `;
   showModal(existing?'Edit client site':'Add client site', body, foot);
-  document.getElementById('sHasFreq').addEventListener('change', (e)=>{ document.getElementById('sFreq').disabled = !e.target.checked; });
+  document.getElementById('sFreqSel').addEventListener('change', (e)=>{
+    const f = document.getElementById('sFreq');
+    f.style.display = e.target.value==='custom' ? 'block' : 'none';
+    if(e.target.value==='custom') f.focus();
+  });
   document.getElementById('sCancel').addEventListener('click', closeModal);
   document.getElementById('sDelete')?.addEventListener('click', ()=>{ closeModal(); confirmDeleteSite(editId); });
   document.getElementById('sSave').addEventListener('click', async ()=>{
@@ -2141,7 +2169,7 @@ function openSiteForm(editId){
       shortName: document.getElementById('sShortName').value.trim(),
       tier: document.getElementById('sTier').value,
       technicianId: techId? Number(techId): null,
-      qaFrequencyDays: document.getElementById('sHasFreq').checked ? (Number(document.getElementById('sFreq').value)||30) : null,
+      qaFrequencyDays: (()=>{ const sel = document.getElementById('sFreqSel').value; if(sel==='') return null; if(sel==='custom') return Math.max(1, Number(document.getElementById('sFreq').value)||30); return Number(sel); })(),
       notes: document.getElementById('sNotes').value.trim(),
       active: document.getElementById('sActive').checked,
       createdAt: existing?.createdAt || new Date().toISOString(),
@@ -3208,6 +3236,90 @@ function buildAbsenceReport(startISO, endISO){
     };
   }).sort((a,b)=> b['Bradford Score'] - a['Bradford Score']);
 }
+/* ---- Site visits report ---- */
+const NON_SITE_EVENT_KEYS = ['wfh','leave','techAbsence','block','oneOnOne'];
+function siteVisitTypeOptions(){
+  return eventTypeList().filter(t=>!NON_SITE_EVENT_KEYS.includes(t.key));
+}
+function buildSiteVisitsReport(startISO, endISO, typeKeys){
+  const today = todayISO();
+  const match = (e, siteId) => e.siteId===siteId && typeKeys.includes(e.type);
+  const rank = { overdue:0, due:1, scheduled:2, ok:3 };
+  const items = state.cache.sites.filter(s=>s.active && !s.isGeneral).map(site=>{
+    const last = lastEventFor(state.cache.events, e=>match(e, site.id));
+    const next = nextEventFor(state.cache.events, e=>match(e, site.id));
+    const status = site.qaFrequencyDays ? statusFor(last?.date, site.qaFrequencyDays, site.createdAt, next?.date) : null;
+    const inRange = state.cache.events.filter(e=> match(e, site.id) && e.completed && e.date>=startISO && e.date<=endISO && e.date<=today).length;
+    return { site, last, next, status, inRange };
+  });
+  items.sort((a,b)=>{
+    const ra = a.status ? rank[a.status.state] : 4, rb = b.status ? rank[b.status.state] : 4;
+    if(ra!==rb) return ra-rb;
+    if(a.status && b.status) return a.status.dueISO.localeCompare(b.status.dueISO);
+    return a.site.name.localeCompare(b.site.name);
+  });
+  return items;
+}
+function siteVisitsSummary(items){
+  const c = { overdue:0, due:0, scheduled:0, ok:0, none:0 };
+  items.forEach(i=>{ if(!i.status) c.none++; else c[i.status.state]++; });
+  return c;
+}
+function ukDateFromISO(iso){ const [y,m,d]=iso.split('-'); return `${d}/${m}/${y}`; }
+function siteVisitsCSVRows(items){
+  return items.map(i=>({
+    'Site': i.site.name,
+    'Region': zoneByKey(i.site.region).label,
+    'Tier': i.site.tier || '',
+    'Return visit cadence': cadenceLabel(i.site.qaFrequencyDays),
+    'Last visit': i.last ? ukDateFromISO(i.last.date) : 'Never',
+    'Next due': i.status ? ukDateFromISO(i.status.state==='scheduled' ? i.status.scheduledISO : i.status.dueISO) : '',
+    'Status': i.status ? i.status.label : 'No schedule',
+    'Visits in range': i.inRange,
+  }));
+}
+function siteVisitsCardHTML(startISO, endISO, expanded){
+  const typeKeys = state.reportsSiteTypes;
+  const items = buildSiteVisitsReport(startISO, endISO, typeKeys);
+  const sum = siteVisitsSummary(items);
+  const typeChips = siteVisitTypeOptions().map(t=>
+    `<button class="chip ${typeKeys.includes(t.key)?'active':''}" data-sv-type="${escapeHTML(t.key)}">${escapeHTML(t.label)}</button>`).join('');
+  const tiles = [
+    ['Overdue', sum.overdue, 'var(--clay)'],
+    ['Due within 7 days', sum.due, '#B9861F'],
+    ['Scheduled', sum.scheduled, 'var(--forest-dim)'],
+    ['On track', sum.ok, 'var(--forest-dim)'],
+    ['No schedule', sum.none, 'var(--text-faint)'],
+  ].map(([l,n,c])=>`<div class="card kpi-card" style="padding:12px 14px;"><div class="kpi-label">${l}</div><div class="kpi-value" style="color:${c};margin:4px 0 0;">${n}</div></div>`).join('');
+  const badgeFor = (st)=> !st ? `<span class="badge badge-neutral">No schedule</span>`
+    : st.state==='overdue' ? `<span class="badge badge-overdue">${escapeHTML(st.label)}</span>`
+    : st.state==='due' ? `<span class="badge badge-due">${escapeHTML(st.label)}</span>`
+    : st.state==='scheduled' ? `<span class="badge badge-scheduled">${escapeHTML(st.label)}</span>`
+    : `<span class="badge badge-ok">${escapeHTML(st.label)}</span>`;
+  const rows = items.map(i=>`<tr>
+      <td><div class="row-name">${escapeHTML(i.site.name)}${i.site.tier?` <span class="badge badge-neutral">${escapeHTML(i.site.tier)}</span>`:''}</div></td>
+      <td data-label="Region">${regionBadge(i.site.region)}</td>
+      <td data-label="Return visit every"><select class="sv-cadence" data-sv-site="${i.site.id}" style="width:auto;min-width:110px;">${cadenceSelectOptions(i.site.qaFrequencyDays)}</select></td>
+      <td data-label="Last visit">${i.last ? humanDateShort(i.last.date) : 'Never'}</td>
+      <td data-label="Next due">${i.status ? humanDateShort(i.status.state==='scheduled' ? i.status.scheduledISO : i.status.dueISO) : '—'}</td>
+      <td data-label="Status">${badgeFor(i.status)}</td>
+      <td data-label="Visits in range">${i.inRange}</td>
+    </tr>`).join('');
+  return `
+  <div class="card ${expanded?'':'is-collapsed'}" style="margin-bottom:18px;">
+    <div class="panel-title" data-collapse-toggle="sitevisits"><h3>Site visits &amp; return cadence</h3><div style="display:flex;align-items:center;gap:10px;"><button class="icon-btn" id="repExportSiteVisits">Export CSV</button><span class="collapse-chevron">▾</span></div></div>
+    <div class="panel-body" style="padding:6px 14px 14px;">
+      <p style="font-size:12px;color:var(--text-faint);margin:6px 0 10px;">Counts only completed visits of the types selected below. "Last visit", "Next due" and the status use those same types and each site's return-visit cadence; "Visits in range" uses the date range above. Change a site's cadence straight from the table.</p>
+      <div class="chip-filter" style="margin-bottom:12px;">${typeChips}</div>
+      ${typeKeys.length ? `
+      <div class="kpi-grid" style="margin-bottom:14px;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;">${tiles}</div>
+      ${items.length ? `<div class="table-wrap"><table class="responsive-table">
+        <thead><tr><th>Site</th><th>Region</th><th>Return visit every</th><th>Last visit</th><th>Next due</th><th>Status</th><th>Visits in range</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>` : `<p style="font-size:12.5px;color:var(--text-faint);padding:12px 0;">No active client sites yet.</p>`}`
+      : `<p style="font-size:12.5px;color:var(--text-faint);padding:12px 0;">Pick at least one visit type above.</p>`}
+    </div>
+  </div>`;
+}
 function reportTableHTML(rows, emptyMsg){
   if(!rows.length) return `<p style="font-size:12.5px;color:var(--text-faint);padding:12px 0;">${emptyMsg}</p>`;
   const headers = Object.keys(rows[0]);
@@ -3251,6 +3363,7 @@ function renderReports(){
     <div class="field"><label>Start</label><input type="date" id="repStart" value="${startISO}"></div>
     <div class="field"><label>End</label><input type="date" id="repEnd" value="${endISO}"></div>
   </div>
+  ${siteVisitsCardHTML(startISO, endISO, rc.sitevisits)}
   <div class="card ${rc.absence?'':'is-collapsed'}" style="margin-bottom:18px;">
     <div class="panel-title" data-collapse-toggle="absence"><h3>Absences &amp; Bradford Score</h3><div style="display:flex;align-items:center;gap:10px;"><button class="icon-btn" id="repExportAbsence">Export CSV</button><span class="collapse-chevron">▾</span></div></div>
     <div class="panel-body" style="padding:6px 14px 14px;">
@@ -3277,6 +3390,31 @@ function mountReports(){
   document.getElementById('repStart')?.addEventListener('change', (e)=>{ state.reportsCustomStart = e.target.value; render(); });
   document.getElementById('repEnd')?.addEventListener('change', (e)=>{ state.reportsCustomEnd = e.target.value; render(); });
   const { startISO, endISO } = reportsRangeISO();
+  document.querySelectorAll('[data-sv-type]').forEach(b=>b.addEventListener('click', ()=>{
+    const k = b.dataset.svType;
+    const cur = state.reportsSiteTypes;
+    state.reportsSiteTypes = cur.includes(k) ? cur.filter(x=>x!==k) : [...cur, k];
+    render();
+  }));
+  document.querySelectorAll('.sv-cadence').forEach(sel=>{
+    sel.addEventListener('click', e=>e.stopPropagation());
+    sel.addEventListener('change', async ()=>{
+      const site = state.cache.sites.find(x=>x.id===Number(sel.dataset.svSite));
+      if(!site) return;
+      try{
+        await DB.put('sites', { ...site, qaFrequencyDays: sel.value ? Number(sel.value) : null });
+        toast(sel.value ? `${site.name}: ${cadenceLabel(Number(sel.value)).toLowerCase()}` : `${site.name}: no schedule`);
+        render();
+      }catch(err){ console.error(err); toast('Could not save — check your connection'); }
+    });
+  });
+  document.getElementById('repExportSiteVisits')?.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    if(!state.reportsSiteTypes.length){ toast('Pick at least one visit type'); return; }
+    const rows = siteVisitsCSVRows(buildSiteVisitsReport(startISO, endISO, state.reportsSiteTypes));
+    if(!rows.length){ toast('Nothing to export'); return; }
+    exportCSV(rows, `site-visits_${startISO}_to_${endISO}`);
+  });
   document.getElementById('repExportAbsence')?.addEventListener('click', (e)=>{
     e.stopPropagation();
     const rows = buildAbsenceReport(startISO, endISO);
